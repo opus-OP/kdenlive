@@ -5900,8 +5900,10 @@ void TimelineController::exportSubtitle()
         pCore->displayMessage(i18n("No subtitles in current project. Export not possible."), ErrorMessage);
         return;
     }
-    QString currentSub = m_model->getSubtitleModel()->getUrl();
-    if (currentSub.isEmpty()) {
+    // Export the plain editing file: the file read by the subtitles filter is a throwaway render file
+    // holding the injected animation tags, which must not leak into an exported (re-importable) file.
+    QString currentSub = m_model->getSubtitleModel()->editingFilePath();
+    if (currentSub.isEmpty() || !QFile::exists(currentSub)) {
         return;
     }
     QString selectedFilter;
@@ -5946,7 +5948,8 @@ void TimelineController::exportSubtitle()
             KMessageBox::error(qApp->activeWindow(), i18n("Cannot write to file %1", srcFile.fileName()));
         }
     } else {
-        int line = m_model->getSubtitleModel()->saveSubtitleData(m_model->getSubtitleModel()->toJson(), url);
+        // SRT/VTT is plain text: no animation tags or resolved styles are written.
+        int line = m_model->getSubtitleModel()->saveSubtitleData(m_model->getSubtitleModel()->toJson(), url, SubtitleModel::SubtitleSaveMode::Editing);
         if (line <= 0) {
             KMessageBox::error(qApp->activeWindow(), i18n("Cannot write to file %1", srcFile.fileName()));
         }

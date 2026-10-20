@@ -3618,6 +3618,8 @@ void MainWindow::resetSubtitles(const QUuid &uuid)
                 if (workFile.exists()) {
                     workFile.remove();
                 }
+                // The throwaway render file (injected animation tags) lives in the temp directory too
+                QFile::remove(pCore->currentDoc()->subTitleRenderPath(uuid, i.key().first));
             }
         }
     }

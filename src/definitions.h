@@ -494,6 +494,147 @@ private:
     QString m_text;
 };
 
+/** @brief Kind of animation attached to a subtitle style.
+ *
+ *  @ref Erase is the counterpart of @ref Typewriter for the exit animation: the characters
+ *  disappear one after the other instead of appearing one after the other.
+ */
+enum class SubtitleAnimationKind { None, Fade, Move, Scale, Rotate, Typewriter, Erase };
+
+/** @brief Upper bound (ms) accepted when parsing an animation duration/delay, so that a corrupt file
+ *  cannot overflow the integer arithmetic used to build the override tags. */
+constexpr int kSubtitleAnimationMaxDurationMs = 3600000;
+/** @brief Bounds accepted when parsing an animation intensity (scale factor). */
+constexpr double kSubtitleAnimationMinIntensity = 0.01;
+constexpr double kSubtitleAnimationMaxIntensity = 100.0;
+/** @brief Text longer than this many characters is not wrapped character by character.
+ *
+ * The per character tags (typewriter / erase) would bloat the subtitle file without a visible
+ * benefit, so such animations fall back to a fade. The same limit applies to texts containing user
+ * authored override blocks, which cannot be typed safely.
+ */
+constexpr int kTypewriterMaxChars = 500;
+
+/**
+ * @brief Animation applied to every event using a subtitle style.
+ *
+ * The animation is translated into ASS override tags prepended to the event text
+ * (or, for the typewriter, into a per-character wrapper), which are understood by
+ * the libass version shipped with MLT.
+ *
+ * The meaning of @ref direction and @ref intensity depends on @ref kind:
+ *  - Fade: @ref direction and @ref intensity are unused, @ref delayMs is ignored
+ *    because <tt>\\fad()</tt> always starts at the event start.
+ *  - Move: direction 0 = slide in from the bottom, 1 = from the top, 2 = from the
+ *    left, 3 = from the right.
+ *  - Scale: @ref intensity is the target scale factor (>= 1 zooms in from 100%,
+ *    < 1 zooms out from the inverse start value 100% / intensity).
+ *  - Rotate: direction 0 = full 360 degree turn, 1 = -90 degree, 2 = +90 degree,
+ *    3 = 180 degree.
+ *  - Typewriter: characters appear one after the other; @ref delayMs shifts the
+ *    start and @ref durationMs is the total typing time.
+ *
+ * All times used in ASS tags are milliseconds relative to the start of the event.
+ *
+ * A style can carry two animations: an entrance (see @ref SubtitleStyle::animation) anchored at
+ * the start of the event and an exit (see @ref SubtitleStyle::animationOut) anchored at the end.
+ * For the exit animation @ref delayMs is measured backwards from the end of the event, i.e. the
+ * animation starts at <tt>eventEnd - delayMs - durationMs</tt>. A @ref SubtitleAnimationKind::Fade
+ * ignores @ref delayMs because <tt>\\fad()</tt> has no delay argument.
+ */
+struct SubtitleAnimation
+{
+    SubtitleAnimationKind kind = SubtitleAnimationKind::None;
+    /** @brief Length of the animation itself, in milliseconds */
+    int durationMs = 500;
+    /** @brief Delay after the event start before the animation begins, in milliseconds */
+    int delayMs = 0;
+    /** @brief Direction of the animation, meaning depends on kind (see above) */
+    int direction = 0;
+    /** @brief Strength of the animation (scale factor for Scale, unused otherwise) */
+    double intensity = 1.0;
+    /** @brief Whether the animation decelerates towards its end (only used by the \\t transition based animations: scale and rotate) */
+    bool easeInOut = true;
+
+    bool isEnabled() const { return kind != SubtitleAnimationKind::None; }
+
+    /** @brief Serialize to the compact [Kdenlive Extradata] value, e.g. <tt>kind=fade;dur=400;...</tt> */
+    QString toString() const;
+    /** @brief Tolerant parser of the value produced by @ref toString (unknown data ignored) */
+    static SubtitleAnimation fromString(const QString &value);
+
+    /**
+     * @brief Generate the ASS override prefix for this animation.
+     *
+     * Returns a string such as <tt>{\\an2\\move(640,900,640,690,0,500)}</tt> that must be
+     * prepended to the event text. Alignment, frame size, margins, font size, line count and the
+     * estimated text width are taken from the style and the project (the anchor is derived from the
+     * alignment and the margins, the slides start outside of the frame). Returns an empty string for a disabled animation
+     * or for @ref SubtitleAnimationKind::Typewriter (handled by @ref applyToText).
+     */
+    QString toAssPrefix(int eventDurationMs, int alignment, int frameWidth, int frameHeight, int marginL, int marginR, int marginV, double fontSize,
+                        int lineCount, int textWidth) const;
+
+    /** @brief Rough width, in PlayRes units, of the widest line of @p text:
+     *  <tt>characters * fontSize * 0.55</tt> with the style scale assumed to be 100%. */
+    static int estimateTextWidth(const QString &text, double fontSize);
+
+    /**
+     * @brief Wrap every character of @p text in its own transparent to opaque block.
+     *
+     * User authored override blocks (<tt>{...}</tt>) are left intact and attached to the
+     * following character. Line breaks are preserved. Returns @p text unchanged for
+     * animations other than @ref SubtitleAnimationKind::Typewriter.
+     */
+    QString applyToText(const QString &text, int eventDurationMs) const;
+};
+
+/**
+ * @brief Entrance and exit animations of a subtitle style, resolved together.
+ *
+ * A style owns two independent animations: @ref in is anchored at the start of the event and
+ * @ref out at its end. They cannot be translated into ASS tags independently because libass
+ * imposes a few constraints:
+ *  - <tt>\\move</tt> and <tt>\\pos</tt> are mutually exclusive and only one <tt>\\move</tt> is
+ *    possible per event, so two slides degrade the exit animation to a fade;
+ *  - <tt>\\fad</tt> cannot be combined with the per character <tt>\\t(\\alpha)</tt>, so a fade
+ *    combined with a typewriter or an erase is generated per character instead;
+ *  - <tt>\\t</tt> needs an explicit starting value, which is emitted before every transition.
+ * This object owns the resulting policy; call @ref resolveForText first when the text is known,
+ * then use @ref toAssPrefix and @ref applyToText together.
+ */
+struct SubtitleAnimationSet
+{
+    SubtitleAnimation in;
+    SubtitleAnimation out;
+
+    bool isEnabled() const { return in.isEnabled() || out.isEnabled(); }
+
+    /**
+     * @brief Copy with the per character animations degraded when @p text cannot be typed safely.
+     *
+     * Typewriter and erase are turned into fades for texts containing user override blocks or
+     * longer than @ref kTypewriterMaxChars.
+     */
+    SubtitleAnimationSet resolveForText(const QString &text) const;
+
+    /**
+     * @brief Effective time windows of both animations, in milliseconds relative to the event start.
+     *
+     * When both animations are enabled and their combined length (plus delays) exceeds the event,
+     * both are shrunk proportionally, never below 1 ms, so that they never overlap. A window of a
+     * disabled animation is set to -1.
+     */
+    void resolveWindows(int eventDurationMs, qint64 *inStart, qint64 *inEnd, qint64 *outStart, qint64 *outEnd) const;
+
+    /** @brief ASS override prefix describing both animations (see SubtitleAnimation::toAssPrefix) */
+    QString toAssPrefix(int eventDurationMs, int alignment, int frameWidth, int frameHeight, int marginL, int marginR, int marginV, double fontSize,
+                        int lineCount, int textWidth) const;
+
+    /** @brief Per character wrapper for the typewriter/erase animations (see SubtitleAnimation::applyToText) */
+    QString applyToText(const QString &text, int eventDurationMs) const;
+};
+
 class SubtitleStyle
 {
 public:
@@ -551,6 +692,8 @@ public:
     int marginR() const { return m_marginR; }
     int marginV() const { return m_marginV; }
     int encoding() const { return m_encoding; }
+    const SubtitleAnimation &animation() const { return m_animation; }
+    const SubtitleAnimation &animationOut() const { return m_animationOut; }
 
     void setFontName(QString fontName) { m_fontName = fontName; }
     void setFontSize(double fontSize) { m_fontSize = fontSize; }
@@ -574,6 +717,8 @@ public:
     void setMarginR(int marginR) { m_marginR = marginR; }
     void setMarginV(int marginV) { m_marginV = marginV; }
     void setEncoding(int encoding) { m_encoding = encoding; }
+    void setAnimation(const SubtitleAnimation &animation) { m_animation = animation; }
+    void setAnimationOut(const SubtitleAnimation &animation) { m_animationOut = animation; }
 
 private:
     QString m_fontName = QStringLiteral("Arial");
@@ -598,6 +743,8 @@ private:
     int m_marginR = 40;
     int m_marginV = 40;
     int m_encoding = 1;
+    SubtitleAnimation m_animation;
+    SubtitleAnimation m_animationOut;
 };
 
 QDebug operator<<(QDebug qd, const ItemInfo &info);

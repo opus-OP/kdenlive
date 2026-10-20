@@ -210,6 +210,8 @@ This is how the subtitle trakc is represented in the kdenlive xml:
   </filter>
 ```
 
+Since the introduction of subtitle style animations, the file the `avfilter.subtitles` filter reads during editing is a throwaway `<documentid>-<sessionid>-render.ass` file in the temp directory. It is regenerated on every change and, unlike the persisted sidecar file, contains the ASS override tags generated from the style animations and the styles resolved from the shared library. The sidecar file only holds the plain event text and the styles defined in the subtitle file. Project level styles are stored in the sequence property `globalSubtitleStyles` (a JSON array whose entries have a `style` field and the optional `animation` and `animationOut` fields); see [subtitle-styles.md](subtitle-styles.md) for the details.
+
 ### Transitions (Compositions)
 
 Transitions come in two (three) flavors, but always represented by MLT `<transition>` elements:

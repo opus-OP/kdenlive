@@ -120,6 +120,26 @@ SubtitleStyleEdit::SubtitleStyleEdit(QWidget *parent)
     connect(comboAlignment, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &SubtitleStyleEdit::updateProperties);
     connect(editPreview, &QLineEdit::textChanged, this, &SubtitleStyleEdit::updateProperties);
 
+    populateAnimationPresets(comboAnimationPreset, false);
+    populateAnimationPresets(comboAnimationOutPreset, true);
+    const AnimationWidgets inWidgets = animationInWidgets();
+    const AnimationWidgets outWidgets = animationOutWidgets();
+    connect(comboAnimationPreset, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this, inWidgets]() { animationPresetChanged(inWidgets, false); });
+    connect(comboAnimationOutPreset, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+            [this, outWidgets]() { animationPresetChanged(outWidgets, true); });
+    connect(spinAnimationDelay, QOverload<int>::of(&QSpinBox::valueChanged), this, &SubtitleStyleEdit::updateProperties);
+    connect(spinAnimationDuration, QOverload<int>::of(&QSpinBox::valueChanged), this, &SubtitleStyleEdit::updateProperties);
+    connect(spinAnimationIntensity, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, &SubtitleStyleEdit::updateProperties);
+    connect(spinAnimationDirection, QOverload<int>::of(&QSpinBox::valueChanged), this, &SubtitleStyleEdit::updateProperties);
+    connect(checkAnimationEase, &QCheckBox::checkStateChanged, this, &SubtitleStyleEdit::updateProperties);
+    connect(spinAnimationOutDelay, QOverload<int>::of(&QSpinBox::valueChanged), this, &SubtitleStyleEdit::updateProperties);
+    connect(spinAnimationOutDuration, QOverload<int>::of(&QSpinBox::valueChanged), this, &SubtitleStyleEdit::updateProperties);
+    connect(spinAnimationOutIntensity, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, &SubtitleStyleEdit::updateProperties);
+    connect(spinAnimationOutDirection, QOverload<int>::of(&QSpinBox::valueChanged), this, &SubtitleStyleEdit::updateProperties);
+    connect(checkAnimationOutEase, &QCheckBox::checkStateChanged, this, &SubtitleStyleEdit::updateProperties);
+    updateAnimationWidgets(inWidgets, false);
+    updateAnimationWidgets(outWidgets, true);
+
     preview->hide();
     editPreview->hide();
     horizontalSpacer->changeSize(0, 0, QSizePolicy::Fixed, QSizePolicy::Fixed);
@@ -152,18 +172,26 @@ SubtitleStyleEdit::SubtitleStyleEdit(QWidget *parent)
 SubtitleStyleEdit::~SubtitleStyleEdit() {}
 
 const SubtitleStyle SubtitleStyleEdit::getStyle(QWidget *parent, const SubtitleStyle &style, QString &styleName, std::shared_ptr<const SubtitleModel> model,
-                                                bool global, bool *ok)
+                                                SubtitleStyleScope scope, bool *ok)
 {
     SubtitleStyleEdit *dialog = new SubtitleStyleEdit(parent);
     QStringList existingStyleNames;
-    for (auto &style : model->getAllSubtitleStyles(global)) {
-        existingStyleNames.append(style.first);
+    if (scope == SubtitleStyleScope::Shared) {
+        if (const SubtitleStyleLibrary *library = model->styleLibrary()) {
+            for (const auto &style : library->sharedStyles()) {
+                existingStyleNames.append(style.first);
+            }
+        }
+    } else {
+        for (const auto &style : model->getAllSubtitleStyles(scope == SubtitleStyleScope::Project)) {
+            existingStyleNames.append(style.first);
+        }
     }
     const int previewWidth = model->scriptInfo().at("PlayResX").toInt();
     const int previewHeight = model->scriptInfo().at("PlayResY").toInt();
     const QString previewPath = model->previewSubtitlePath();
     dialog->setProperties(style, styleName, previewWidth, previewHeight, previewPath, ok);
-    if (!global && styleName == "Default") {
+    if (scope == SubtitleStyleScope::SubtitleFile && styleName == "Default") {
         dialog->editName->setEnabled(false);
     }
     while (true) {
@@ -218,6 +246,18 @@ void SubtitleStyleEdit::setProperties(const SubtitleStyle &style, const QString 
     QSignalBlocker bk16(comboBorderStyle);
     QSignalBlocker bk17(comboAlignment);
     QSignalBlocker bk18(editPreview);
+    QSignalBlocker bk19(comboAnimationPreset);
+    QSignalBlocker bk20(spinAnimationDelay);
+    QSignalBlocker bk21(spinAnimationDuration);
+    QSignalBlocker bk22(spinAnimationIntensity);
+    QSignalBlocker bk23(spinAnimationDirection);
+    QSignalBlocker bk24(checkAnimationEase);
+    QSignalBlocker bk25(comboAnimationOutPreset);
+    QSignalBlocker bk26(spinAnimationOutDelay);
+    QSignalBlocker bk27(spinAnimationOutDuration);
+    QSignalBlocker bk28(spinAnimationOutIntensity);
+    QSignalBlocker bk29(spinAnimationOutDirection);
+    QSignalBlocker bk30(checkAnimationOutEase);
 
     m_style = style;
 
@@ -247,6 +287,11 @@ void SubtitleStyleEdit::setProperties(const SubtitleStyle &style, const QString 
     comboBorderStyle->setCurrentIndex(comboBorderStyle->findData(style.borderStyle()));
     comboAlignment->setCurrentIndex(comboAlignment->findData(style.alignment()));
 
+    setAnimationWidgets(animationInWidgets(), style.animation(), false);
+    setAnimationWidgets(animationOutWidgets(), style.animationOut(), true);
+    updateAnimationWidgets(animationInWidgets(), false);
+    updateAnimationWidgets(animationOutWidgets(), true);
+
     editPreview->setText("Add Text");
     editName->setText(styleName);
     m_ok = ok;
@@ -274,7 +319,7 @@ void SubtitleStyleEdit::setProperties(const SubtitleStyle &style, const QString 
                                   .arg(m_height)
                                   .arg(style.toString("Default"))
                                   .arg("Default")
-                                  .arg(editPreview->text());
+                                  .arg(previewText());
         m_previewFile.write(fileContent.toUtf8());
         m_previewFile.close();
         // create a temp producer for preview
@@ -327,6 +372,9 @@ void SubtitleStyleEdit::updateProperties()
     m_style.setBorderStyle(comboBorderStyle->currentData().toInt());
     m_style.setAlignment(comboAlignment->currentData().toInt());
 
+    m_style.setAnimation(animationFromWidgets(animationInWidgets(), false));
+    m_style.setAnimationOut(animationFromWidgets(animationOutWidgets(), true));
+
     m_previewFile.setFileName(m_previewPath);
     m_previewFile.open(QIODevice::WriteOnly);
     QString fileContent = QStringLiteral("[Script Info]\n; Script generated by Kdenlive for preview purpose\nScriptType: v4.00+\n"
@@ -344,7 +392,7 @@ void SubtitleStyleEdit::updateProperties()
                               .arg(m_height)
                               .arg(m_style.toString("Default"))
                               .arg("Default")
-                              .arg(editPreview->text());
+                              .arg(previewText());
     m_previewFile.write(fileContent.toUtf8());
     m_previewFile.close();
 
@@ -354,4 +402,158 @@ void SubtitleStyleEdit::updateProperties()
     QImage p = KThumb::getFrame(frame, m_width, m_height);
     delete frame;
     preview->setPixmap(QPixmap::fromImage(p));
+}
+
+QString SubtitleStyleEdit::previewText() const
+{
+    // The preview event lasts one second
+    const int eventDurationMs = 1000;
+    SubtitleAnimationSet animations;
+    animations.in = m_style.animation();
+    animations.out = m_style.animationOut();
+    const QString text = editPreview->text();
+    if (!animations.isEnabled()) {
+        return text;
+    }
+    // Use the same resolution as the model so that a degraded animation also previews correctly
+    animations = animations.resolveForText(text);
+    const int textWidth = SubtitleAnimation::estimateTextWidth(text, m_style.fontSize());
+    const QString prefix = animations.toAssPrefix(eventDurationMs, m_style.alignment(), m_width, m_height, m_style.marginL(), m_style.marginR(),
+                                                  m_style.marginV(), m_style.fontSize(), 1, textWidth);
+    return prefix + animations.applyToText(text, eventDurationMs);
+}
+
+SubtitleStyleEdit::AnimationWidgets SubtitleStyleEdit::animationInWidgets() const
+{
+    return {comboAnimationPreset, spinAnimationDelay, spinAnimationDuration, spinAnimationDirection, spinAnimationIntensity, checkAnimationEase};
+}
+
+SubtitleStyleEdit::AnimationWidgets SubtitleStyleEdit::animationOutWidgets() const
+{
+    return {comboAnimationOutPreset,   spinAnimationOutDelay,     spinAnimationOutDuration,
+            spinAnimationOutDirection, spinAnimationOutIntensity, checkAnimationOutEase};
+}
+
+void SubtitleStyleEdit::populateAnimationPresets(QComboBox *combo, bool isOut) const
+{
+    combo->addItem(i18n("None"), 0);
+    combo->addItem(i18n("Fade"), 1);
+    combo->addItem(isOut ? i18n("Slide to bottom") : i18n("Slide from bottom"), 2);
+    combo->addItem(isOut ? i18n("Slide to top") : i18n("Slide from top"), 3);
+    combo->addItem(isOut ? i18n("Slide to left") : i18n("Slide from left"), 4);
+    combo->addItem(isOut ? i18n("Slide to right") : i18n("Slide from right"), 5);
+    combo->addItem(i18n("Zoom in"), 6);
+    combo->addItem(i18n("Zoom out"), 7);
+    combo->addItem(i18n("Rotate"), 8);
+    combo->addItem(isOut ? i18n("Erase (per character)") : i18n("Typewriter"), 9);
+}
+
+SubtitleAnimation SubtitleStyleEdit::animationFromWidgets(const AnimationWidgets &widgets, bool isOut) const
+{
+    SubtitleAnimation animation;
+    animation.delayMs = widgets.delay->value();
+    animation.durationMs = widgets.duration->value();
+    animation.direction = widgets.direction->value();
+    animation.intensity = widgets.intensity->value();
+    animation.easeInOut = widgets.ease->isChecked();
+    switch (widgets.preset->currentData().toInt()) {
+    case 1:
+        animation.kind = SubtitleAnimationKind::Fade;
+        break;
+    case 2:
+    case 3:
+    case 4:
+    case 5:
+        animation.kind = SubtitleAnimationKind::Move;
+        // The slide direction is part of the preset
+        animation.direction = widgets.preset->currentData().toInt() - 2;
+        break;
+    case 6:
+    case 7:
+        animation.kind = SubtitleAnimationKind::Scale;
+        break;
+    case 8:
+        animation.kind = SubtitleAnimationKind::Rotate;
+        break;
+    case 9:
+        animation.kind = isOut ? SubtitleAnimationKind::Erase : SubtitleAnimationKind::Typewriter;
+        break;
+    case 0:
+    default:
+        break;
+    }
+    return animation;
+}
+
+void SubtitleStyleEdit::setAnimationWidgets(const AnimationWidgets &widgets, const SubtitleAnimation &animation, bool isOut)
+{
+    widgets.preset->setCurrentIndex(widgets.preset->findData(presetForAnimation(animation, isOut)));
+    widgets.delay->setValue(animation.delayMs);
+    widgets.duration->setValue(animation.durationMs);
+    widgets.direction->setValue(qBound(0, animation.direction, 3));
+    widgets.intensity->setValue(animation.intensity > 0 ? animation.intensity : 1.0);
+    widgets.ease->setChecked(animation.easeInOut);
+}
+
+void SubtitleStyleEdit::updateAnimationWidgets(const AnimationWidgets &widgets, bool isOut)
+{
+    const int preset = widgets.preset->currentData().toInt();
+    const bool isMove = preset >= 2 && preset <= 5;
+    const bool isFade = preset == 1;
+    const bool isScale = preset == 6 || preset == 7;
+    const bool isRotate = preset == 8;
+    const bool isPerCharacter = preset == 9;
+    const bool isEnabled = preset != 0;
+    // \fad() has no delay argument, so the delay field is irrelevant for a fade
+    widgets.delay->setEnabled(isEnabled && !isFade);
+    widgets.duration->setEnabled(isEnabled);
+    // The direction is fixed by the slide presets, it selects the rotation angle / erasing order otherwise
+    widgets.direction->setEnabled(isRotate || (isOut && isPerCharacter));
+    widgets.intensity->setEnabled(isScale);
+    // Easing only applies to the tag based animations using a \t transition
+    widgets.ease->setEnabled(isScale || isRotate);
+    if (isMove) {
+        // The slide direction is fixed by the preset, show it for information
+        QSignalBlocker bk(widgets.direction);
+        widgets.direction->setValue(preset - 2);
+    }
+}
+
+void SubtitleStyleEdit::animationPresetChanged(const AnimationWidgets &widgets, bool isOut)
+{
+    // Suggest sensible defaults for the parameters of the newly selected preset
+    switch (widgets.preset->currentData().toInt()) {
+    case 6:
+        widgets.intensity->setValue(1.5);
+        break;
+    case 7:
+        widgets.intensity->setValue(0.5);
+        break;
+    default:
+        break;
+    }
+    updateAnimationWidgets(widgets, isOut);
+    updateProperties();
+}
+
+int SubtitleStyleEdit::presetForAnimation(const SubtitleAnimation &animation, bool isOut)
+{
+    switch (animation.kind) {
+    case SubtitleAnimationKind::Fade:
+        return 1;
+    case SubtitleAnimationKind::Move:
+        return 2 + qBound(0, animation.direction, 3);
+    case SubtitleAnimationKind::Scale:
+        return animation.intensity >= 1.0 ? 6 : 7;
+    case SubtitleAnimationKind::Rotate:
+        return 8;
+    case SubtitleAnimationKind::Typewriter:
+        // A typewriter only exists on the entrance tab, an erase only on the exit tab
+        return isOut ? 0 : 9;
+    case SubtitleAnimationKind::Erase:
+        return isOut ? 9 : 0;
+    case SubtitleAnimationKind::None:
+    default:
+        return 0;
+    }
 }

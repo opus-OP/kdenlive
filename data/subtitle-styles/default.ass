@@ -1,0 +1,15 @@
+[Script Info]
+; Kdenlive subtitle style library
+ScriptType: v4.00+
+Title: default
+
+[Kdenlive Extradata]
+LibraryVersion: 1
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,40,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100.00,100.00,0.00,0.00,1,2.00,1.00,2,10,10,20,1
+Style: News,Arial,36,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100.00,100.00,0.00,0.00,1,2.00,1.00,2,10,10,20,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text

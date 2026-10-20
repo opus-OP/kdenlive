@@ -16,5 +16,6 @@
         <file alias="kdenlive_wipes.knsrc">../data/knewstuff/kdenlive_wipes.knsrc</file>
         <file alias="kdenlive_keyboardschemes.knsrc">../data/knewstuff/kdenlive_keyboardschemes.knsrc</file>
         <file alias="kdenlive_luts.knsrc">../data/knewstuff/kdenlive_luts.knsrc</file>
+        <file alias="kdenlive_subtitle_styles.knsrc">../data/knewstuff/kdenlive_subtitle_styles.knsrc</file>
     </qresource>
 </RCC>

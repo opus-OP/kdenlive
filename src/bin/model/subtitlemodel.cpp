@@ -7,9 +7,11 @@
 #include "config-kdenlive.h"
 #include "core.h"
 #include "doc/kdenlivedoc.h"
+#include "kdenlive_debug.h"
 #include "kdenlivesettings.h"
 #include "macros.hpp"
 #include "project/projectmanager.h"
+#include "subtitlestylelibrary.h"
 #include "timeline2/model/groupsmodel.hpp"
 #include "timeline2/model/snapmodel.hpp"
 #include "timeline2/model/timelineitemmodel.hpp"
@@ -37,6 +39,9 @@ SubtitleModel::SubtitleModel(std::shared_ptr<TimelineItemModel> timeline, const 
     , m_subtitleFilter(new Mlt::Filter(pCore->getProjectProfile(), "avfilter.subtitles"))
 {
     qDebug() << "Subtitle constructor";
+    // The library is shared by all sequences so that an edit made through one of them is seen by the others
+    m_styleLibrary = SubtitleStyleLibrary::instance();
+    connect(m_styleLibrary, &SubtitleStyleLibrary::libraryChanged, this, &SubtitleModel::modelChanged);
     // Ensure the subtitle also covers transparent zones (useful for timeline sequences)
     m_subtitleFilter->set("av.alpha", 1);
     if (m_timeline->tractor() != nullptr) {
@@ -53,7 +58,7 @@ SubtitleModel::SubtitleModel(std::shared_ptr<TimelineItemModel> timeline, const 
     registerSnap(snapModel);
 
     // Load global subtitle styles
-    m_globalSubtitleStyles = pCore->currentDoc()->globalSubtitleStyles(timeline->uuid());
+    m_projectStyles = pCore->currentDoc()->globalSubtitleStyles(timeline->uuid());
 
     QFile subFile(subPath);
     if (pCore->currentDoc()->m_restoreFromBackup) {
@@ -315,6 +320,8 @@ void SubtitleModel::importSubtitle(const QString &filePath, int offset, bool ext
         // else: UTF8 is the default
         QString line;
         qDebug() << " correct ass file  " << filePath;
+        QList<QPair<QString, QString>> pendingAnimations;
+        QList<QPair<QString, QString>> pendingAnimationsOut;
         while (stream.readLineInto(&line)) {
             line = line.simplified();
             if (!line.isEmpty()) {
@@ -366,6 +373,20 @@ void SubtitleModel::importSubtitle(const QString &filePath, int offset, bool ext
                         for (int i = m_defaultStyles.size(); i < m_maxLayer + 1; i++) {
                             m_defaultStyles << "Default";
                         }
+                    } else if (extraData[0].trimmed() == "Animation" && extraData.size() > 1) {
+                        const QString value = line.section(":", 1).trimmed();
+                        const int separator = value.indexOf(QLatin1Char('|'));
+                        if (separator > 0) {
+                            // Defer: the style the animation belongs to is only known after the styles section
+                            pendingAnimations.append({value.left(separator).trimmed(), value.mid(separator + 1)});
+                        }
+                    } else if (extraData[0].trimmed() == "AnimationOut" && extraData.size() > 1) {
+                        const QString value = line.section(":", 1).trimmed();
+                        const int separator = value.indexOf(QLatin1Char('|'));
+                        if (separator > 0) {
+                            // Defer: the style the animation belongs to is only known after the styles section
+                            pendingAnimationsOut.append({value.left(separator).trimmed(), value.mid(separator + 1)});
+                        }
                     }
                 }
                 if (section.contains("V4+ Styles")) {
@@ -405,6 +426,19 @@ void SubtitleModel::importSubtitle(const QString &filePath, int offset, bool ext
             }
         }
         assFile.close();
+        // Attach the animations read from the Extradata section to the styles they name
+        for (const auto &pending : pendingAnimations) {
+            auto styleIt = m_subtitleStyles.find(pending.first);
+            if (styleIt != m_subtitleStyles.end()) {
+                styleIt->second.setAnimation(SubtitleAnimation::fromString(pending.second));
+            }
+        }
+        for (const auto &pending : pendingAnimationsOut) {
+            auto styleIt = m_subtitleStyles.find(pending.first);
+            if (styleIt != m_subtitleStyles.end()) {
+                styleIt->second.setAnimationOut(SubtitleAnimation::fromString(pending.second));
+            }
+        }
     } else {
         //   reinitialize for next comment:
         comment.clear();
@@ -443,6 +477,12 @@ void SubtitleModel::parseSubtitle(const QString &workPath)
 const QString SubtitleModel::getUrl()
 {
     return m_subtitleFilter->get("av.filename");
+}
+
+QString SubtitleModel::editingFilePath() const
+{
+    const int ix = pCore->currentDoc()->getSequenceProperty(m_timeline->uuid(), QStringLiteral("kdenlive:activeSubtitleIndex"), QStringLiteral("0")).toInt();
+    return pCore->currentDoc()->subTitlePath(m_timeline->uuid(), ix, false);
 }
 
 bool SubtitleModel::addSubtitle(std::pair<int, GenTime> start, const SubtitleEvent &event, Fun &undo, Fun &redo, bool updateFilter)
@@ -1203,7 +1243,8 @@ void SubtitleModel::subtitleFileFromZone(int in, int out, const QString &outFile
         currentSubtitle.insert(QLatin1String("dialogue"), QJsonValue(subtitle.second.toString(layer, inTime)));
         list.push_back(currentSubtitle);
     }
-    saveSubtitleData(list, outFile);
+    // This is the subtitle asset consumed by a render job: keep the animations.
+    saveSubtitleData(list, outFile, SubtitleSaveMode::Render);
 }
 
 const QJsonArray SubtitleModel::toJson()
@@ -1219,9 +1260,14 @@ const QJsonArray SubtitleModel::toJson()
     return list;
 }
 
-void SubtitleModel::copySubtitle(const QString &path, int ix, bool checkOverwrite, bool updateFilter)
+void SubtitleModel::copySubtitle(const QString &path, int ix, bool checkOverwrite, bool updateFilter, bool fromRenderFile)
 {
-    QFile srcFile(pCore->currentDoc()->subTitlePath(m_timeline->uuid(), ix, false));
+    // The persisted sidecar is copied from the editing file (plain text and file-scope styles), while
+    // the assets of a render job are copied from the throwaway render file (which carries the
+    // injected animation tags and the resolved styles).
+    const QString source =
+        fromRenderFile ? pCore->currentDoc()->subTitleRenderPath(m_timeline->uuid(), ix) : pCore->currentDoc()->subTitlePath(m_timeline->uuid(), ix, false);
+    QFile srcFile(source);
     if (srcFile.exists()) {
         QFile prev(path);
         if (prev.exists()) {
@@ -1244,35 +1290,117 @@ void SubtitleModel::copySubtitle(const QString &path, int ix, bool checkOverwrit
 
 void SubtitleModel::restoreTmpFile(int ix)
 {
-
-    QString outFile = pCore->currentDoc()->subTitlePath(m_timeline->uuid(), ix, false);
+    // The filter always reads the render file, which carries the injected animation tags.
+    const QString outFile = pCore->currentDoc()->subTitleRenderPath(m_timeline->uuid(), ix);
     m_subtitleFilter->set("av.filename", outFile.toUtf8().constData());
 }
 
 void SubtitleModel::jsontoSubtitle(const QJsonArray &data)
 {
     int ix = pCore->currentDoc()->getSequenceProperty(m_timeline->uuid(), QStringLiteral("kdenlive:activeSubtitleIndex"), QStringLiteral("0")).toInt();
-    QString outFile = pCore->currentDoc()->subTitlePath(m_timeline->uuid(), ix, false);
-    QString masterFile = m_subtitleFilter->get("av.filename");
-    if (masterFile.isEmpty()) {
-        m_subtitleFilter->set("av.filename", outFile.toUtf8().constData());
-    }
-    int line = saveSubtitleData(data, outFile);
-    qDebug() << "Saving subtitle filter: " << outFile;
+    const QString editingFile = pCore->currentDoc()->subTitlePath(m_timeline->uuid(), ix, false);
+    const QString renderFile = pCore->currentDoc()->subTitleRenderPath(m_timeline->uuid(), ix);
+    // The editing file is the persisted source of truth: plain text and file-scope styles only, so a
+    // reload never re-imports the generated data (which used to accumulate the animation tags).
+    saveSubtitleData(data, editingFile, SubtitleSaveMode::Editing);
+    // The render file is what the subtitles filter reads: it adds the injected animation tags and the
+    // styles resolved through the cascade. It is a throwaway, regenerated (overwritten) on every save.
+    int line = saveSubtitleData(data, renderFile, SubtitleSaveMode::Render);
+    qCDebug(KDENLIVE_LOG) << "Saving subtitle filter: " << renderFile;
     if (line > 0) {
-        m_subtitleFilter->set("av.filename", outFile.toUtf8().constData());
+        m_subtitleFilter->set("av.filename", renderFile.toUtf8().constData());
         m_timeline->tractor()->attach(*m_subtitleFilter.get());
     } else {
         m_timeline->tractor()->detach(*m_subtitleFilter.get());
     }
 }
 
-int SubtitleModel::saveSubtitleData(const QJsonArray &list, const QString &outFile)
+QString SubtitleModel::injectAnimation(const QString &dialogue, const SubtitleEvent &event, const GenTime &startPos) const
+{
+    // Dialogue: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text.
+    // Locate the 9th comma separating the fixed header from the free text (which may itself
+    // contain commas, including the commas of the injected \\move/\t arguments).
+    int headerEnd = -1;
+    for (int i = 0; i < 9; ++i) {
+        headerEnd = dialogue.indexOf(QLatin1Char(','), headerEnd + 1);
+        if (headerEnd < 0) {
+            return dialogue;
+        }
+    }
+    const QString styleName = dialogue.section(QLatin1Char(','), 3, 3).trimmed();
+    const QString effect = dialogue.section(QLatin1Char(','), 8, 8).trimmed();
+    if (!effect.isEmpty()) {
+        // Banner/Scroll effects completely override \move/\pos and the typewriter, so no tag is emitted.
+        qCDebug(KDENLIVE_LOG) << "Subtitle animation skipped for event using effect" << effect << "and style" << styleName;
+        return dialogue;
+    }
+    SubtitleStyle style;
+    auto fileIt = m_subtitleStyles.find(styleName);
+    if (fileIt != m_subtitleStyles.end()) {
+        style = fileIt->second;
+    } else if (hasResolvedSubtitleStyle(styleName)) {
+        style = resolveSubtitleStyle(styleName);
+    } else {
+        return dialogue;
+    }
+    SubtitleAnimationSet animations;
+    animations.in = style.animation();
+    animations.out = style.animationOut();
+    if (!animations.isEnabled()) {
+        return dialogue;
+    }
+    const QString text = dialogue.mid(headerEnd + 1);
+    if (text.isEmpty()) {
+        return dialogue;
+    }
+    const int eventDurationMs = qMax(0, qRound((event.endTime() - startPos).ms()));
+    const int lineCount = text.count(QLatin1Char('\n')) + 1;
+    int frameWidth = 0;
+    int frameHeight = 0;
+    auto widthIt = m_scriptInfo.find(QStringLiteral("PlayResX"));
+    auto heightIt = m_scriptInfo.find(QStringLiteral("PlayResY"));
+    if (widthIt != m_scriptInfo.end()) {
+        frameWidth = widthIt->second.toInt();
+    }
+    if (heightIt != m_scriptInfo.end()) {
+        frameHeight = heightIt->second.toInt();
+    }
+    if (frameWidth <= 0 || frameHeight <= 0) {
+        const QSize frameSize = pCore->getCurrentFrameDisplaySize();
+        if (frameWidth <= 0) {
+            frameWidth = frameSize.width();
+        }
+        if (frameHeight <= 0) {
+            frameHeight = frameSize.height();
+        }
+    }
+    // Degrade the per character animations (typewriter / erase) when the text cannot be typed
+    // safely; the resolved set must be used for both the prefix and the text so that the two stay
+    // consistent (a degraded erase falls back to a fade emitted as a \fad tag).
+    const SubtitleAnimationSet resolved = animations.resolveForText(text);
+    if (resolved.in.kind != animations.in.kind || resolved.out.kind != animations.out.kind) {
+        qCWarning(KDENLIVE_LOG) << "Subtitle character animation degraded to fade (characters" << text.size() << ", user blocks"
+                                << (text.contains(QLatin1Char('{')) || text.contains(QLatin1Char('}'))) << ")";
+    }
+    const int textWidth = SubtitleAnimation::estimateTextWidth(text, style.fontSize());
+    const QString prefix = resolved.toAssPrefix(eventDurationMs, style.alignment(), frameWidth, frameHeight, style.marginL(), style.marginR(), style.marginV(),
+                                                style.fontSize(), lineCount, textWidth);
+    const QString body = resolved.applyToText(text, eventDurationMs);
+    if (prefix.isEmpty()) {
+        return dialogue.left(headerEnd + 1) + body;
+    }
+    return dialogue.left(headerEnd + 1) + prefix + body;
+}
+
+int SubtitleModel::saveSubtitleData(const QJsonArray &list, const QString &outFile, SubtitleSaveMode mode)
 {
     bool assFormat = outFile.endsWith(".ass");
     if (!assFormat) {
         qDebug() << "srt/vtt/sbv file import"; // if imported file isn't .ass, it is .srt format
     }
+    // Only the render file carries generated data (resolved styles and injected animation tags); the
+    // editing file must stay the plain source of truth so that a reload never re-imports it.
+    const bool renderMode = (mode == SubtitleSaveMode::Render);
     QFile outF(outFile);
 
     QWriteLocker locker(&m_lock);
@@ -1290,6 +1418,32 @@ int SubtitleModel::saveSubtitleData(const QJsonArray &list, const QString &outFi
             }
             out << '\n';
 
+            // Styles resolved through the cascade (project > shared > built-in) for the styles
+            // referenced by events or layer defaults, so that a subtitle using a shared style
+            // renders correctly even though it is not part of the subtitle file styles.
+            std::map<QString, SubtitleStyle> extraStyles;
+            if (renderMode) {
+                auto registerResolvedStyle = [this, &extraStyles](const QString &styleName) {
+                    if (styleName.isEmpty() || m_subtitleStyles.find(styleName) != m_subtitleStyles.end() || extraStyles.find(styleName) != extraStyles.end()) {
+                        return;
+                    }
+                    if (m_projectStyles.find(styleName) != m_projectStyles.end() || (m_styleLibrary && m_styleLibrary->hasStyle(styleName))) {
+                        extraStyles[styleName] = resolveSubtitleStyle(styleName);
+                    }
+                };
+                for (const auto &entry : std::as_const(list)) {
+                    if (!entry.isObject()) {
+                        continue;
+                    }
+                    const QString dialogue = entry.toObject()[QLatin1String("dialogue")].toString();
+                    // Dialogue: Layer, Start, End, Style, Name, ...
+                    registerResolvedStyle(dialogue.section(QLatin1Char(','), 3, 3).trimmed());
+                }
+                for (const QString &styleName : std::as_const(m_defaultStyles)) {
+                    registerResolvedStyle(styleName);
+                }
+            }
+
             out << "[Kdenlive Extradata]\n";
             out << "MaxLayer: " + QString::number(getMaxLayer()) + '\n';
             QString defaultStyles;
@@ -1298,6 +1452,25 @@ int SubtitleModel::saveSubtitleData(const QJsonArray &list, const QString &outFi
             }
             defaultStyles.chop(1);
             out << "DefaultStyles: " + defaultStyles + '\n';
+            // Subtitle animations are stored as "Animation: <StyleName>|<params>" lines, both for the
+            // styles written in the file and for the ones resolved through the cascade (the latter
+            // only appear in the render file).
+            for (const auto &entry : std::as_const(m_subtitleStyles)) {
+                if (entry.second.animation().isEnabled()) {
+                    out << "Animation: " << entry.first << '|' << entry.second.animation().toString() << '\n';
+                }
+                if (entry.second.animationOut().isEnabled()) {
+                    out << "AnimationOut: " << entry.first << '|' << entry.second.animationOut().toString() << '\n';
+                }
+            }
+            for (const auto &entry : std::as_const(extraStyles)) {
+                if (entry.second.animation().isEnabled()) {
+                    out << "Animation: " << entry.first << '|' << entry.second.animation().toString() << '\n';
+                }
+                if (entry.second.animationOut().isEnabled()) {
+                    out << "AnimationOut: " << entry.first << '|' << entry.second.animationOut().toString() << '\n';
+                }
+            }
 
             out << '\n';
 
@@ -1305,6 +1478,9 @@ int SubtitleModel::saveSubtitleData(const QJsonArray &list, const QString &outFi
                                   "Italic, Underline, StrikeOut, "
                                   "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n");
             for (const auto &entry : std::as_const(m_subtitleStyles)) {
+                out << entry.second.toString(entry.first) << '\n';
+            }
+            for (const auto &entry : std::as_const(extraStyles)) {
                 out << entry.second.toString(entry.first) << '\n';
             }
             out << '\n';
@@ -1330,6 +1506,11 @@ int SubtitleModel::saveSubtitleData(const QJsonArray &list, const QString &outFi
             GenTime endPos = sub.endTime();
             line++;
             if (assFormat) {
+                if (renderMode) {
+                    // Render file only: inject the animation tags of the event style.
+                    dialogue = injectAnimation(dialogue, sub, startPos);
+                }
+                // Ensure line breaks are correctly handled
                 dialogue.replace(QLatin1Char('\n'), QStringLiteral("\\N"));
                 // Format: Layer, Start, End, Style, Actor, MarginL, MarginR, MarginV, Effect, Text
                 // TODO : (after adjusting the structure of m_subtitleList)
@@ -1877,38 +2058,38 @@ void SubtitleModel::reload()
     activateSubtitle(currentIx);
 }
 
-const std::map<QString, SubtitleStyle> &SubtitleModel::getAllSubtitleStyles(bool global) const
+const std::map<QString, SubtitleStyle> &SubtitleModel::getAllSubtitleStyles(bool project) const
 {
-    if (global) {
-        return m_globalSubtitleStyles;
+    if (project) {
+        return m_projectStyles;
     } else {
         return m_subtitleStyles;
     }
 }
 
-const SubtitleStyle &SubtitleModel::getSubtitleStyle(const QString &name, bool global) const
+const SubtitleStyle &SubtitleModel::getSubtitleStyle(const QString &name, bool project) const
 {
-    if (global) {
-        return m_globalSubtitleStyles.at(name);
+    if (project) {
+        return m_projectStyles.at(name);
     } else {
         return m_subtitleStyles.at(name);
     }
 }
 
-void SubtitleModel::setSubtitleStyle(const QString &name, const SubtitleStyle &style, bool global)
+void SubtitleModel::setSubtitleStyle(const QString &name, const SubtitleStyle &style, bool project)
 {
-    if (global) {
-        m_globalSubtitleStyles[name] = style;
+    if (project) {
+        m_projectStyles[name] = style;
     } else {
         m_subtitleStyles[name] = style;
         Q_EMIT modelChanged();
     }
 }
 
-void SubtitleModel::deleteSubtitleStyle(const QString &name, bool global)
+void SubtitleModel::deleteSubtitleStyle(const QString &name, bool project)
 {
-    if (global) {
-        m_globalSubtitleStyles.erase(name);
+    if (project) {
+        m_projectStyles.erase(name);
     } else {
         // find all subtitles using this style and set them to default
         for (auto &subtitle : m_subtitleList) {
@@ -1919,6 +2100,73 @@ void SubtitleModel::deleteSubtitleStyle(const QString &name, bool global)
         m_subtitleStyles.erase(name);
         Q_EMIT modelChanged();
     }
+}
+
+SubtitleStyleLibrary *SubtitleModel::styleLibrary() const
+{
+    return m_styleLibrary;
+}
+
+SubtitleStyle SubtitleModel::resolveSubtitleStyle(const QString &name) const
+{
+    // Cascade, lowest to highest: built-in < shared (user) < project < subtitle file.
+    // The styles actually written in the subtitle file (for example the auto-managed
+    // "Default" style) have the highest precedence because they are the ones rendered.
+    auto fileIt = m_subtitleStyles.find(name);
+    if (fileIt != m_subtitleStyles.end()) {
+        return fileIt->second;
+    }
+    auto projectIt = m_projectStyles.find(name);
+    if (projectIt != m_projectStyles.end()) {
+        return projectIt->second;
+    }
+    if (m_styleLibrary) {
+        return m_styleLibrary->style(name);
+    }
+    return SubtitleStyle();
+}
+
+bool SubtitleModel::hasResolvedSubtitleStyle(const QString &name) const
+{
+    if (m_subtitleStyles.find(name) != m_subtitleStyles.end()) {
+        return true;
+    }
+    if (m_projectStyles.find(name) != m_projectStyles.end()) {
+        return true;
+    }
+    return m_styleLibrary && m_styleLibrary->hasStyle(name);
+}
+
+bool SubtitleModel::isSharedSubtitleStyle(const QString &name) const
+{
+    return m_styleLibrary && m_styleLibrary->hasStyle(name);
+}
+
+bool SubtitleModel::isProjectStyleOverridingShared(const QString &name) const
+{
+    return m_projectStyles.find(name) != m_projectStyles.end() && m_styleLibrary && m_styleLibrary->hasStyle(name);
+}
+
+QStringList SubtitleModel::availableSubtitleStyleNames() const
+{
+    std::map<QString, int> names;
+    for (const auto &style : m_subtitleStyles) {
+        names[style.first] = 0;
+    }
+    for (const auto &style : m_projectStyles) {
+        names[style.first] = 0;
+    }
+    if (m_styleLibrary) {
+        for (const auto &style : m_styleLibrary->sharedStyles()) {
+            names[style.first] = 0;
+        }
+    }
+    QStringList result;
+    result.reserve(static_cast<int>(names.size()));
+    for (const auto &entry : names) {
+        result.append(entry.first);
+    }
+    return result;
 }
 
 int SubtitleModel::createNewSubtitle(const QString subtitleName, int id)
@@ -1977,6 +2225,7 @@ bool SubtitleModel::deleteSubtitle(int ix)
         const QString finalPath = pCore->currentDoc()->subTitlePath(m_timeline->uuid(), matchingItem.first, true);
         QFile::remove(workPath);
         QFile::remove(finalPath);
+        QFile::remove(pCore->currentDoc()->subTitleRenderPath(m_timeline->uuid(), matchingItem.first));
         // Remove entry from our subtitles list
         m_subtitlesList.remove(matchingItem);
     }
@@ -2004,9 +2253,15 @@ const QString SubtitleModel::subtitlesFilesToJson()
 const QString SubtitleModel::globalStylesToJson()
 {
     QJsonArray list;
-    for (const auto &style : m_globalSubtitleStyles) {
+    for (const auto &style : m_projectStyles) {
         QJsonObject currentStyle;
         currentStyle.insert(QLatin1String("style"), QJsonValue(style.second.toString(style.first)));
+        if (style.second.animation().isEnabled()) {
+            currentStyle.insert(QLatin1String("animation"), QJsonValue(style.second.animation().toString()));
+        }
+        if (style.second.animationOut().isEnabled()) {
+            currentStyle.insert(QLatin1String("animationOut"), QJsonValue(style.second.animationOut().toString()));
+        }
         list.push_back(currentStyle);
     }
     QJsonDocument json(list);

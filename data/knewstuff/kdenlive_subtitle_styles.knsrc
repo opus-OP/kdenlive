@@ -1,0 +1,6 @@
+[KNewStuff3]
+Name=Kdenlive Subtitle Styles
+ProvidersUrl=https://autoconfig.kde.org/ocs/providers.xml
+Categories=Kdenlive Subtitle Styles
+TargetDir=kdenlive/subtitle-styles
+Uncompress=archive

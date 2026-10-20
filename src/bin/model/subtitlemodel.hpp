@@ -18,6 +18,7 @@
 
 class DocUndoStack;
 class SnapInterface;
+class SubtitleStyleLibrary;
 class TimelineItemModel;
 
 /** @class SubtitleModel
@@ -125,6 +126,10 @@ public:
     const QJsonArray toJson();
     /** @brief Returns the path to sub file */
     const QString getUrl();
+    /** @brief Returns the path of the active plain editing file (no injected animation tags).
+     *  Unlike @ref getUrl, which follows the subtitle filter and therefore points to the throwaway
+     *  render file, this is the file to hand out to the user (export, copy). */
+    QString editingFilePath() const;
     /** @brief Get a subtitle Id from its start position*/
     int getIdForStartPos(int layer, GenTime startTime) const;
     /** @brief Get the duration of a subtitle by id*/
@@ -146,9 +151,11 @@ public:
     /** @brief Copy subtitle file to a new path
      * @param path the new subtitle path
      * @param checkOverwrite if true, warn before overwriting an existing subtitle file
-     * @param updateFilter if true, the subtitle filter will be updated to us the new name, useful when saving the project file */
-    void copySubtitle(const QString &path, int ix, bool checkOverwrite, bool updateFilter = false);
-    /** @brief Use the tmp work file for the subtitle filter after saving the project */
+     * @param updateFilter if true, the subtitle filter will be updated to us the new name, useful when saving the project file
+     * @param fromRenderFile if true, copy the throwaway render file (injected animation tags and resolved
+     * styles) instead of the editing file; used when packaging the assets of a render job */
+    void copySubtitle(const QString &path, int ix, bool checkOverwrite, bool updateFilter = false, bool fromRenderFile = false);
+    /** @brief Point the subtitle filter back at the render file after the project was saved */
     void restoreTmpFile(int ix);
     int trackDuration() const;
     void switchDisabled();
@@ -234,13 +241,25 @@ public:
     /** @brief Reload the subtitle model */
     void reload();
     /** @brief Get all subtitle styles */
-    const std::map<QString, SubtitleStyle> &getAllSubtitleStyles(bool global = false) const;
+    const std::map<QString, SubtitleStyle> &getAllSubtitleStyles(bool project = false) const;
     /** @brief Get a subtitle style by name */
-    const SubtitleStyle &getSubtitleStyle(const QString &name, bool global = false) const;
+    const SubtitleStyle &getSubtitleStyle(const QString &name, bool project = false) const;
     /** @brief Set a subtitle style */
-    void setSubtitleStyle(const QString &name, const SubtitleStyle &style, bool global = false);
+    void setSubtitleStyle(const QString &name, const SubtitleStyle &style, bool project = false);
     /** @brief Delete a subtitle style */
-    void deleteSubtitleStyle(const QString &name, bool global = false);
+    void deleteSubtitleStyle(const QString &name, bool project = false);
+    /** @brief Returns the shared (cross-project) subtitle style library */
+    SubtitleStyleLibrary *styleLibrary() const;
+    /** @brief Returns the style resolved through the cascade: project > shared > built-in */
+    SubtitleStyle resolveSubtitleStyle(const QString &name) const;
+    /** @brief Returns true if the style name can be resolved through the cascade */
+    bool hasResolvedSubtitleStyle(const QString &name) const;
+    /** @brief Returns true if a shared library style has this name */
+    bool isSharedSubtitleStyle(const QString &name) const;
+    /** @brief Returns true if a project style overrides a shared style with the same name */
+    bool isProjectStyleOverridingShared(const QString &name) const;
+    /** @brief Names of all subtitle styles available to events (file, project and shared) */
+    QStringList availableSubtitleStyleNames() const;
     /** @brief Get true if a subtitle is dialogue */
     bool getIsDialogue(int id) const;
     /** @brief Set a subtitle as dialogue */
@@ -281,7 +300,27 @@ public:
     void setLayerDefaultStyle(int layer, const QString styleName);
     /** @brief Get default styles for subtitle layers */
     const QString getLayerDefaultStyle(int layer) const;
-    int saveSubtitleData(const QJsonArray &data, const QString &outFile);
+
+    /**
+     * @brief What a saved subtitle file is meant to be used for.
+     *
+     * The editing file is the persisted source of truth: it holds the plain event text and the styles
+     * defined in the file, so reopening the project never re-imports generated data. The render file
+     * is a throwaway copy that additionally carries the injected animation tags and the styles
+     * resolved through the cascade (project > shared > built-in), which is what the MLT subtitles
+     * filter reads.
+     */
+    enum class SubtitleSaveMode { Editing, Render };
+
+    int saveSubtitleData(const QJsonArray &data, const QString &outFile, SubtitleSaveMode mode);
+    /**
+     * @brief Prepend the ASS override tags of the style animation to the text column of @p dialogue.
+     *
+     * The event duration and the style geometry are used to build the tags. When the event has an
+     * Effect (Banner/Scroll), nothing is emitted because the effect overrides \move/\pos and the
+     * typewriter. @p startPos is the event start time.
+     */
+    QString injectAnimation(const QString &dialogue, const SubtitleEvent &event, const GenTime &startPos) const;
 
 public Q_SLOTS:
     /** @brief Function that parses through a subtitle file */
@@ -311,8 +350,10 @@ private:
     std::map<int, int> m_subtitlesFakePos;
     /** @brief A list of all available styles for the subtitles as: style name, style */
     std::map<QString, SubtitleStyle> m_subtitleStyles;
-    /** @brief A list of subtitle styles storing in the subtitle file, can be used for all subtitles */
-    std::map<QString, SubtitleStyle> m_globalSubtitleStyles;
+    /** @brief A list of project level subtitle styles stored in the project (property key: globalSubtitleStyles) */
+    std::map<QString, SubtitleStyle> m_projectStyles;
+    /** @brief Shared (cross-project) subtitle style library, owned by the application (see SubtitleStyleLibrary::instance) */
+    SubtitleStyleLibrary *m_styleLibrary{nullptr};
     /** @brief A list of properties in the script info section */
     std::map<QString, QString> m_scriptInfo;
     QString fontSection;

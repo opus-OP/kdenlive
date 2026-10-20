@@ -13,12 +13,79 @@ SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
 #include "subtitlestyleedit.h"
 #include "timeline2/view/timelinecontroller.h"
 #include <KMessageBox>
+#include <KNSCore/Entry>
+#include <KNSWidgets/Action>
+#include <QDir>
+#include <QFileDialog>
 #include <QFontDatabase>
 #include <QListWidget>
 #include <QMenu>
 #include <QTableWidget>
 #include <qinputdialog.h>
 #include <qmimedata.h>
+
+namespace {
+/** @brief Convert a style sidebar role to a style scope (non-negative roles are subtitle files) */
+SubtitleStyleScope scopeForRole(int role)
+{
+    if (role == -1) {
+        return SubtitleStyleScope::Project;
+    }
+    if (role == -2) {
+        return SubtitleStyleScope::Shared;
+    }
+    return SubtitleStyleScope::SubtitleFile;
+}
+
+/** @brief Return a name that is not part of @p existing, appending a numeric suffix if needed */
+QString uniqueStyleName(const QString &baseName, const QStringList &existing)
+{
+    if (!existing.contains(baseName)) {
+        return baseName;
+    }
+    int suffix = 1;
+    while (existing.contains(baseName + QLatin1Char(' ') + QString::number(suffix))) {
+        suffix++;
+    }
+    return baseName + QLatin1Char(' ') + QString::number(suffix);
+}
+
+/** @brief Human readable description of a style animation (empty when the animation is disabled)
+ *
+ * @p isOut selects the exit wording: a slide then goes to the given edge and the per character
+ * animation is the erasing one.
+ */
+QString styleAnimationLabel(const SubtitleAnimation &animation, bool isOut)
+{
+    switch (animation.kind) {
+    case SubtitleAnimationKind::Fade:
+        return i18n("Fade");
+    case SubtitleAnimationKind::Move:
+        switch (animation.direction) {
+        case 1:
+            return isOut ? i18n("Slide to top") : i18n("Slide from top");
+        case 2:
+            return isOut ? i18n("Slide to left") : i18n("Slide from left");
+        case 3:
+            return isOut ? i18n("Slide to right") : i18n("Slide from right");
+        case 0:
+        default:
+            return isOut ? i18n("Slide to bottom") : i18n("Slide from bottom");
+        }
+    case SubtitleAnimationKind::Scale:
+        return animation.intensity >= 1.0 ? i18n("Zoom in") : i18n("Zoom out");
+    case SubtitleAnimationKind::Rotate:
+        return i18n("Rotate");
+    case SubtitleAnimationKind::Typewriter:
+        return isOut ? QString() : i18n("Typewriter");
+    case SubtitleAnimationKind::Erase:
+        return isOut ? i18n("Erase") : QString();
+    case SubtitleAnimationKind::None:
+    default:
+        return QString();
+    }
+}
+} // namespace
 
 SideBarDropFilter::SideBarDropFilter(QObject *parent)
     : QObject(parent)
@@ -58,7 +125,7 @@ ManageSubtitles::ManageSubtitles(std::shared_ptr<SubtitleModel> model, TimelineC
 
     parseFileList();
     parseEventList();
-    parseStyleList(false);
+    parseStyleList(SubtitleStyleScope::SubtitleFile);
     parseInfoList();
     // parseSideBar();
 
@@ -140,72 +207,52 @@ ManageSubtitles::ManageSubtitles(std::shared_ptr<SubtitleModel> model, TimelineC
             }
             layerMenu->exec(eventFileSideBar->mapToGlobal(event->position()).toPoint());
         } else if (obj->parent() == styleFileSideBar) {
-            bool fromGlobal = styleFileSideBar->currentItem()->data(Qt::UserRole).toInt() == -1;
-            bool toGlobal = false;
-            int ix = event->position().y() / styleFileSideBar->sizeHintForRow(0);
-            if (ix > styleFileSideBar->count() - 1) {
+            if (styleFileSideBar->currentItem() == nullptr || styleList->currentItem() == nullptr) {
                 return;
             }
-            if (ix == styleFileSideBar->count() - 1) {
-                toGlobal = true;
+            const int ix = event->position().y() / styleFileSideBar->sizeHintForRow(0);
+            if (ix < 0 || ix > styleFileSideBar->count() - 1) {
+                return;
             }
-            int id = styleFileSideBar->item(ix)->data(Qt::UserRole).toInt();
+            const int fromRole = styleFileSideBar->currentItem()->data(Qt::UserRole).toInt();
+            const int toRole = styleFileSideBar->item(ix)->data(Qt::UserRole).toInt();
+            const SubtitleStyleScope fromScope = scopeForRole(fromRole);
+            const SubtitleStyleScope toScope = scopeForRole(toRole);
+            const bool sameContainer = (fromScope == toScope && fromRole == toRole);
 
-            auto copyMoveStyle = [this, fromGlobal, toGlobal, id](bool isMove) {
-                int currentIx = -1;
-                int newIx = -1;
-                QStringList subKeys;
-                const QMap<std::pair<int, QString>, QString> subs = m_model->getSubtitlesList();
-                for (auto sub = subs.cbegin(), end = subs.cend(); sub != end; ++sub) {
-                    subKeys.append(QString::number(sub.key().first) + " - " + sub.key().second);
-                    if (sub.key().first == m_activeSubFile) {
-                        currentIx = subKeys.size() - 1;
-                    }
-                    if (sub.key().first == id) {
-                        newIx = subKeys.size() - 1;
-                    }
+            auto copyMoveStyle = [this, fromScope, toScope, fromRole, toRole](bool isMove) {
+                const QString styleName = currentStyleName();
+                if (styleName.isEmpty()) {
+                    return;
                 }
-                subKeys.append(QString::number(subKeys.count()) + " - " + i18n("Global"));
-                if (toGlobal) {
-                    newIx = subKeys.size() - 1;
+                if (isMove && fromScope == toScope && fromRole == toRole) {
+                    return;
                 }
-
-                SubtitleStyle style = m_model->getSubtitleStyle(styleList->currentItem()->text(0), fromGlobal);
-                QString styleName = styleList->currentItem()->text(0);
-                bool ok;
-                QString sub;
-                if (isMove) {
-                    sub = QInputDialog::getItem(this, i18n("Move Style"), i18n("Select the subtitle file to move the style to:"), subKeys, newIx, false, &ok);
-                } else {
-                    sub = QInputDialog::getItem(this, i18n("Copy Style"), i18n("Select the subtitle file to copy the style to:"), subKeys, newIx, false, &ok);
+                const SubtitleStyle style = styleForScope(styleName, fromScope);
+                const QString newName = uniqueStyleName(styleName, namesForScope(toScope));
+                // A style that cannot be removed from its source (built-in or default style) must not be
+                // "moved": abort instead of silently turning the move into a copy.
+                if (isMove && !deleteStyleInScope(styleName, fromScope, false)) {
+                    return;
                 }
-                if (ok) {
-                    if (isMove) {
-                        m_model->deleteSubtitleStyle(styleName, fromGlobal);
-                    }
-                    if (!toGlobal) {
-                        m_controller->subtitlesMenuActivated(newIx);
-                    }
-                    // avoid conflict with existing style
-                    QStringList existingStyleNames;
-                    for (auto &style : m_model->getAllSubtitleStyles(toGlobal)) {
-                        existingStyleNames.append(style.first);
-                    }
-                    if (existingStyleNames.contains(styleName)) {
-                        int suffix = 1;
-                        while (true) {
-                            if (!existingStyleNames.contains(styleName + " " + QString::number(suffix))) {
-                                styleName = styleName + " " + QString::number(suffix);
-                                break;
-                            }
-                            suffix++;
+                if (toScope == SubtitleStyleScope::SubtitleFile) {
+                    // Activate the target subtitle file so the style is written to it
+                    const QMap<std::pair<int, QString>, QString> subs = m_model->getSubtitlesList();
+                    int comboIx = 0;
+                    for (auto sub = subs.cbegin(); sub != subs.cend(); ++sub, ++comboIx) {
+                        if (sub.key().first == toRole) {
+                            m_controller->subtitlesMenuActivated(comboIx);
+                            break;
                         }
                     }
-
-                    m_model->setSubtitleStyle(styleName, style, toGlobal);
-                    m_controller->subtitlesMenuActivated(currentIx);
-                    parseStyleList(fromGlobal);
+                } else if (toScope == SubtitleStyleScope::Project) {
+                    selectSideBarScope(-1);
+                } else {
+                    selectSideBarScope(-2);
                 }
+                applyStyle(newName, style, toScope);
+                parseStyleList(toScope);
+                selectStyleByName(newName);
             };
 
             QAction *actionMoveStyle = new QAction(i18n("Move To..."), this);
@@ -216,7 +263,11 @@ ManageSubtitles::ManageSubtitles(std::shared_ptr<SubtitleModel> model, TimelineC
             connect(actionCopyStyle, &QAction::triggered, this, [function = copyMoveStyle]() { function(false); });
             QMenu *styleMenu = new QMenu(this);
             styleMenu->addAction(actionCopyStyle);
-            if (fromGlobal || (styleList->currentItem() && styleList->currentItem()->text(0) != "Default")) {
+            const QString draggedStyle = currentStyleName();
+            const SubtitleStyleLibrary *library = m_model->styleLibrary();
+            const bool movable = !(fromScope == SubtitleStyleScope::Shared && library && library->isBuiltinStyle(draggedStyle)) &&
+                                 !(fromScope == SubtitleStyleScope::SubtitleFile && draggedStyle == QLatin1String("Default"));
+            if (!sameContainer && movable) {
                 styleMenu->addAction(actionMoveStyle);
             }
             styleMenu->exec(styleFileSideBar->mapToGlobal(event->position()).toPoint());
@@ -236,7 +287,7 @@ ManageSubtitles::ManageSubtitles(std::shared_ptr<SubtitleModel> model, TimelineC
 
             m_activeSubFile = id;
             parseEventList();
-            parseStyleList(false);
+            parseStyleList(SubtitleStyleScope::SubtitleFile);
             parseInfoList();
             eventFileSideBar->setCurrentRow(fileList->indexOfTopLevelItem(current));
             styleFileSideBar->setCurrentRow(fileList->indexOfTopLevelItem(current));
@@ -256,8 +307,9 @@ ManageSubtitles::ManageSubtitles(std::shared_ptr<SubtitleModel> model, TimelineC
 
         int layer = current->text(0).section(" ", 1, 1).toInt();
         QMenu *menu = new QMenu(this);
-        for (const auto &style : m_model->getAllSubtitleStyles(false)) {
-            menu->addAction(style.first);
+        for (const QString &styleName : m_model->availableSubtitleStyleNames()) {
+            QAction *styleAction = menu->addAction(styleName);
+            styleAction->setToolTip(styleName);
         }
         QAction *action = menu->exec(QCursor::pos());
         if (action) {
@@ -266,13 +318,7 @@ ManageSubtitles::ManageSubtitles(std::shared_ptr<SubtitleModel> model, TimelineC
             current->setText(2, styleName);
         }
     });
-    connect(styleList, &QTreeWidget::currentItemChanged, this, [this](QTreeWidgetItem *current, QTreeWidgetItem *) {
-        if (styleFileSideBar->currentItem()->data(Qt::UserRole).toInt() == -1) {
-            buttonDeleteStyle->setEnabled(styleList->topLevelItemCount() > 0);
-        } else {
-            buttonDeleteStyle->setEnabled(current->text(0) != "Default");
-        }
-    });
+    connect(styleList, &QTreeWidget::currentItemChanged, this, [this](QTreeWidgetItem *, QTreeWidgetItem *) { updateStyleButtons(); });
     connect(eventList, &QTreeWidget::currentItemChanged, this, [this](QTreeWidgetItem *current, QTreeWidgetItem *) {
         buttonDeleteLayer->setEnabled(current->parent() != nullptr || eventList->topLevelItemCount() > 1);
     });
@@ -288,7 +334,7 @@ ManageSubtitles::ManageSubtitles(std::shared_ptr<SubtitleModel> model, TimelineC
 
             m_activeSubFile = id;
             parseEventList();
-            parseStyleList(false);
+            parseStyleList(SubtitleStyleScope::SubtitleFile);
             parseInfoList();
             fileList->setCurrentItem(fileList->topLevelItem(eventFileSideBar->currentRow()));
             styleFileSideBar->setCurrentRow(eventFileSideBar->currentRow());
@@ -302,25 +348,25 @@ ManageSubtitles::ManageSubtitles(std::shared_ptr<SubtitleModel> model, TimelineC
         QSignalBlocker bk(fileList);
         QSignalBlocker bk2(eventFileSideBar);
         QSignalBlocker bk3(infoFileSideBar);
-        if (current->data(Qt::UserRole).toInt() == -1) {
-            parseStyleList(true);
-        } else {
-            int id = current->data(Qt::UserRole).toInt();
-            if (id > -1) {
-                int ix = styleFileSideBar->row(current);
-                m_controller->subtitlesMenuActivated(ix);
+        const int role = current->data(Qt::UserRole).toInt();
+        if (role == -1) {
+            parseStyleList(SubtitleStyleScope::Project);
+        } else if (role == -2) {
+            parseStyleList(SubtitleStyleScope::Shared);
+        } else if (role > -1) {
+            m_activeSubFile = role;
+            const int ix = styleFileSideBar->row(current);
+            m_controller->subtitlesMenuActivated(ix);
 
-                m_activeSubFile = id;
-                parseEventList();
-                parseStyleList(false);
-                parseInfoList();
-                fileList->setCurrentItem(fileList->topLevelItem(styleFileSideBar->currentRow()));
-                eventFileSideBar->setCurrentRow(styleFileSideBar->currentRow());
-                infoFileSideBar->setCurrentRow(styleFileSideBar->currentRow());
-            } else {
-                QSignalBlocker bk4(styleFileSideBar);
-                styleFileSideBar->setCurrentItem(previous);
-            }
+            parseEventList();
+            parseStyleList(SubtitleStyleScope::SubtitleFile);
+            parseInfoList();
+            fileList->setCurrentItem(fileList->topLevelItem(styleFileSideBar->currentRow()));
+            eventFileSideBar->setCurrentRow(styleFileSideBar->currentRow());
+            infoFileSideBar->setCurrentRow(styleFileSideBar->currentRow());
+        } else {
+            QSignalBlocker bk4(styleFileSideBar);
+            styleFileSideBar->setCurrentItem(previous);
         }
     });
     connect(infoFileSideBar, &QListWidget::currentItemChanged, this, [this](QListWidgetItem *current, QListWidgetItem *previous) {
@@ -334,7 +380,7 @@ ManageSubtitles::ManageSubtitles(std::shared_ptr<SubtitleModel> model, TimelineC
 
             m_activeSubFile = id;
             parseEventList();
-            parseStyleList(false);
+            parseStyleList(SubtitleStyleScope::SubtitleFile);
             parseInfoList();
             fileList->setCurrentItem(fileList->topLevelItem(infoFileSideBar->currentRow()));
             eventFileSideBar->setCurrentRow(infoFileSideBar->currentRow());
@@ -350,35 +396,14 @@ ManageSubtitles::ManageSubtitles(std::shared_ptr<SubtitleModel> model, TimelineC
     connect(buttonNewLayer, &QPushButton::clicked, this, &ManageSubtitles::addLayer);
     connect(buttonDuplicateLayer, &QPushButton::clicked, this, &ManageSubtitles::duplicateLayer);
     connect(buttonDeleteLayer, &QPushButton::clicked, this, &ManageSubtitles::deleteLayer);
-    connect(buttonNewStyle, &QPushButton::clicked, this, [this]() {
-        if (styleFileSideBar->currentItem()->data(Qt::UserRole).toInt() == -1) {
-            addStyle(true);
-        } else {
-            addStyle(false);
-        }
-    });
+    connect(buttonNewStyle, &QPushButton::clicked, this, [this]() { addStyle(currentStyleScope()); });
 
-    connect(buttonDuplicateStyle, &QPushButton::clicked, this, [this]() {
-        if (styleFileSideBar->currentItem()->data(Qt::UserRole).toInt() == -1) {
-            duplicateStyle(true);
-        } else {
-            duplicateStyle(false);
-        }
-    });
-    connect(buttonDeleteStyle, &QPushButton::clicked, this, [this]() {
-        if (styleFileSideBar->currentItem()->data(Qt::UserRole).toInt() == -1) {
-            deleteStyle(true);
-        } else {
-            deleteStyle(false);
-        }
-    });
-    connect(buttonEditStyle, &QPushButton::clicked, this, [this]() {
-        if (styleFileSideBar->currentItem()->data(Qt::UserRole).toInt() == -1) {
-            editStyle(true);
-        } else {
-            editStyle(false);
-        }
-    });
+    connect(buttonDuplicateStyle, &QPushButton::clicked, this, [this]() { duplicateStyle(currentStyleScope()); });
+    connect(buttonDeleteStyle, &QPushButton::clicked, this, [this]() { deleteStyle(currentStyleScope()); });
+    connect(buttonEditStyle, &QPushButton::clicked, this, [this]() { editStyle(currentStyleScope()); });
+
+    styleList->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(styleList, &QTreeWidget::customContextMenuRequested, this, [this](const QPoint &pos) { showStyleMenu(pos); });
 
     // Import/Export menu
     QMenu *menu = new QMenu(this);
@@ -389,6 +414,26 @@ ManageSubtitles::ManageSubtitles(std::shared_ptr<SubtitleModel> model, TimelineC
     connect(importSub, &QAction::triggered, this, &ManageSubtitles::importSubtitleFile);
     connect(exportSub, &QAction::triggered, m_controller, &TimelineController::exportSubtitle);
     buttonMenuFile->setMenu(menu);
+
+    // Download new shared (cross-project) style sets from the KDE store. The action
+    // hides itself when KNewStuff is not available (KAuthorized::GHNS).
+    m_downloadStyleAction = new KNSWidgets::Action(i18n("Download New Subtitle Styles…"), QStringLiteral(":data/kdenlive_subtitle_styles.knsrc"), this);
+    connect(m_downloadStyleAction, &KNSWidgets::Action::dialogFinished, this, [this](const QList<KNSCore::Entry> &changedEntries) {
+        if (changedEntries.isEmpty() || !m_model) {
+            return;
+        }
+        SubtitleStyleLibrary *library = m_model->styleLibrary();
+        if (!library) {
+            return;
+        }
+        // Pick up the newly installed (or removed) sets and refresh the visible list.
+        // Mirrors the library's own saveStyle()/importSet(): reload() does not notify on
+        // its own, so emit libraryChanged (wired to SubtitleModel::modelChanged) to have
+        // the .ass regenerated and the newly downloaded styles usable right away.
+        library->reload();
+        Q_EMIT library->libraryChanged();
+        parseStyleList(currentStyleScope());
+    });
 }
 
 ManageSubtitles::~ManageSubtitles()
@@ -454,14 +499,54 @@ void ManageSubtitles::parseEventList()
     buttonDeleteLayer->setEnabled(eventList->topLevelItemCount() > 1);
 }
 
-void ManageSubtitles::parseStyleList(bool global)
+void ManageSubtitles::parseStyleList(SubtitleStyleScope scope)
 {
     QSignalBlocker bk(styleList);
     styleList->clear();
 
-    std::map<QString, SubtitleStyle> styles = m_model->getAllSubtitleStyles(global);
+    std::map<QString, SubtitleStyle> styles;
+    SubtitleStyleLibrary *library = m_model->styleLibrary();
+    switch (scope) {
+    case SubtitleStyleScope::Project:
+        styles = m_model->getAllSubtitleStyles(true);
+        break;
+    case SubtitleStyleScope::Shared:
+        if (library) {
+            styles = library->sharedStyles();
+        }
+        break;
+    case SubtitleStyleScope::SubtitleFile:
+    default:
+        styles = m_model->getAllSubtitleStyles(false);
+        break;
+    }
+
     for (const auto &style : styles) {
-        QTreeWidgetItem *styleItem = new QTreeWidgetItem(styleList, {style.first,
+        const QString name = style.first;
+        QString displayName = name;
+        QString toolTip = i18n("Style name: %1", name);
+        if (scope == SubtitleStyleScope::Project && m_model->isProjectStyleOverridingShared(name)) {
+            displayName = i18n("%1 (overrides shared style)", name);
+            toolTip = i18n("This project style overrides a shared style with the same name.");
+        } else if (scope == SubtitleStyleScope::Shared && library && library->isBuiltinStyle(name)) {
+            displayName = i18n("%1 (built-in)", name);
+            toolTip = i18n("This style is provided by a read-only built-in style set.");
+        }
+        QStringList animationLabels;
+        const QString animationIn = styleAnimationLabel(style.second.animation(), false);
+        const QString animationOut = styleAnimationLabel(style.second.animationOut(), true);
+        if (!animationIn.isEmpty()) {
+            animationLabels << animationIn;
+        }
+        if (!animationOut.isEmpty()) {
+            animationLabels << animationOut;
+        }
+        if (!animationLabels.isEmpty()) {
+            const QString animationLabel = animationLabels.join(QStringLiteral(" + "));
+            displayName = i18n("%1 [%2]", displayName, animationLabel);
+            toolTip = i18n("%1 Animation: %2.", toolTip, animationLabel);
+        }
+        QTreeWidgetItem *styleItem = new QTreeWidgetItem(styleList, {displayName,
                                                                      style.second.fontName(),
                                                                      QString::number(style.second.fontSize()),
                                                                      style.second.bold() ? "Yes" : "No",
@@ -484,6 +569,8 @@ void ManageSubtitles::parseStyleList(bool global)
                                                                      QString::number(style.second.marginR()),
                                                                      QString::number(style.second.marginV()),
                                                                      QString::number(style.second.encoding())});
+        styleItem->setData(0, Qt::UserRole, name);
+        styleItem->setToolTip(0, toolTip);
         QLabel *labelPrimary = new QLabel();
         labelPrimary->setStyleSheet(QStringLiteral("background-color: %1").arg(style.second.primaryColour().name()));
         styleList->setItemWidget(styleItem, 7, labelPrimary);
@@ -539,16 +626,7 @@ void ManageSubtitles::parseStyleList(bool global)
         }
     }
     styleList->setCurrentItem(styleList->topLevelItem(0));
-
-    if (global) {
-        buttonDeleteStyle->setEnabled(styleList->topLevelItemCount() > 0);
-        buttonEditStyle->setEnabled(styleList->topLevelItemCount() > 0);
-        buttonDuplicateStyle->setEnabled(styleList->topLevelItemCount() > 0);
-    } else {
-        buttonDeleteStyle->setEnabled(styleList->currentItem() && styleList->currentItem()->text(0) != "Default");
-        buttonEditStyle->setEnabled(styleList->currentItem());
-        buttonDuplicateStyle->setEnabled(styleList->currentItem());
-    }
+    updateStyleButtons();
 }
 
 void ManageSubtitles::parseInfoList()
@@ -584,11 +662,18 @@ void ManageSubtitles::parseSideBar()
         newItem->setData(Qt::UserRole, topLevelItem->data(0, Qt::UserRole));
     }
     QListWidgetItem *newItem = new QListWidgetItem(styleFileSideBar);
-    newItem->setText(i18n("Global"));
+    newItem->setText(i18n("Project"));
     QFont font = newItem->font();
     font.setBold(true);
     newItem->setData(Qt::FontRole, font);
     newItem->setData(Qt::UserRole, -1);
+
+    newItem = new QListWidgetItem(styleFileSideBar);
+    newItem->setText(i18n("Shared"));
+    font = newItem->font();
+    font.setBold(true);
+    newItem->setData(Qt::FontRole, font);
+    newItem->setData(Qt::UserRole, -2);
 
     eventFileSideBar->setCurrentRow(fileList->indexOfTopLevelItem(fileList->currentItem()));
     styleFileSideBar->setCurrentRow(fileList->indexOfTopLevelItem(fileList->currentItem()));
@@ -624,15 +709,15 @@ void ManageSubtitles::addLayer()
     eventList->setCurrentItem(eventList->topLevelItem(eventList->topLevelItemCount() - 1));
 }
 
-void ManageSubtitles::addStyle(bool global)
+void ManageSubtitles::addStyle(SubtitleStyleScope scope)
 {
     bool ok;
-    QString styleName = "";
-    SubtitleStyle style = SubtitleStyleEdit::getStyle(this, SubtitleStyle(), styleName, m_model, global, &ok);
+    QString styleName;
+    SubtitleStyle style = SubtitleStyleEdit::getStyle(this, SubtitleStyle(), styleName, m_model, scope, &ok);
     if (ok) {
-        m_model->setSubtitleStyle(styleName, style, global);
-        parseStyleList(global);
-        styleList->setCurrentItem(styleList->topLevelItem(styleList->topLevelItemCount() - 1));
+        applyStyle(styleName, style, scope);
+        parseStyleList(scope);
+        selectStyleByName(styleName);
     }
 }
 
@@ -655,28 +740,26 @@ void ManageSubtitles::duplicateLayer()
     eventList->setCurrentItem(eventList->topLevelItem(eventList->topLevelItemCount() - 1));
 }
 
-void ManageSubtitles::duplicateStyle(bool global)
+void ManageSubtitles::duplicateStyle(SubtitleStyleScope scope)
 {
-    QTreeWidgetItem *current = styleList->currentItem();
-    QString styleName = current->text(0);
-    const SubtitleStyle style = m_model->getSubtitleStyle(styleName, global);
-    QStringList existingStyleNames;
-    for (auto &style : m_model->getAllSubtitleStyles(global)) {
-        existingStyleNames.append(style.first);
+    const QString sourceName = currentStyleName();
+    if (sourceName.isEmpty()) {
+        return;
     }
-
+    const SubtitleStyle style = styleForScope(sourceName, scope);
+    QString styleName;
     int suffix = 1;
+    const QStringList existingStyleNames = namesForScope(scope);
     while (true) {
-        if (!existingStyleNames.contains("Style " + QString::number(suffix))) {
-            styleName = "Style " + QString::number(suffix);
+        styleName = QStringLiteral("Style %1").arg(suffix);
+        if (!existingStyleNames.contains(styleName)) {
             break;
         }
         suffix++;
     }
-    m_model->setSubtitleStyle(styleName, style, global);
-
-    parseStyleList(global);
-    styleList->setCurrentItem(styleList->topLevelItem(styleList->topLevelItemCount() - 1));
+    applyStyle(styleName, style, scope);
+    parseStyleList(scope);
+    selectStyleByName(styleName);
 }
 
 void ManageSubtitles::deleteFile()
@@ -773,40 +856,32 @@ void ManageSubtitles::deleteLayer()
     }
 }
 
-void ManageSubtitles::deleteStyle(bool global)
+void ManageSubtitles::deleteStyle(SubtitleStyleScope scope)
 {
-    QTreeWidgetItem *current = styleList->currentItem();
-    const QString name = current->text(0);
-    if (!global && name == "Default") {
-        KMessageBox::error(this, i18n("Cannot delete default style."));
+    const QString name = currentStyleName();
+    if (name.isEmpty()) {
         return;
     }
-    if (global) {
-        if (KMessageBox::warningContinueCancel(this, i18n("This will delete the style <b>%1</b> and all its properties.", name)) != KMessageBox::Continue) {
-            return;
-        }
-    } else {
-        if (KMessageBox::warningContinueCancel(
-                this, i18n("This will delete the style <b>%1</b> and all its properties.\nSubtitles using this style will be reset to style <b>Default</b>.",
-                           name)) != KMessageBox::Continue) {
-            return;
-        }
+    if (deleteStyleInScope(name, scope, true)) {
+        parseStyleList(scope);
     }
-    m_model->deleteSubtitleStyle(name, global);
-    parseStyleList(global);
 }
 
-void ManageSubtitles::editStyle(bool global)
+void ManageSubtitles::editStyle(SubtitleStyleScope scope)
 {
-    QTreeWidgetItem *current = styleList->currentItem();
-    QString styleName = current->text(0);
-    SubtitleStyle style = m_model->getSubtitleStyle(styleName, global);
+    const QString styleName = currentStyleName();
+    if (styleName.isEmpty()) {
+        return;
+    }
+    SubtitleStyle style = styleForScope(styleName, scope);
     bool ok;
-    style = SubtitleStyleEdit::getStyle(this, style, styleName, m_model, global, &ok);
+    QString newName = styleName;
+    style = SubtitleStyleEdit::getStyle(this, style, newName, m_model, scope, &ok);
     if (ok) {
-        m_model->setSubtitleStyle(styleName, style, global);
-        parseStyleList(global);
-        styleList->setCurrentItem(styleList->topLevelItem(styleList->topLevelItemCount() - 1));
+        // If the name changed, the dialog already ensured it is not used by another style in this scope
+        applyStyle(newName, style, scope);
+        parseStyleList(scope);
+        selectStyleByName(newName);
     }
 }
 
@@ -830,8 +905,318 @@ void ManageSubtitles::importSubtitleFile()
         m_model->importSubtitle(d->subtitle_url->url().toLocalFile(), offset, true, startFramerate, targetFramerate,
                                 d->codecs_list->currentData().toString().toUtf8());
         parseFileList();
-        parseStyleList(false);
+        parseStyleList(SubtitleStyleScope::SubtitleFile);
         parseEventList();
         parseInfoList();
+    }
+}
+
+SubtitleStyleScope ManageSubtitles::currentStyleScope() const
+{
+    if (styleFileSideBar->currentItem() == nullptr) {
+        return SubtitleStyleScope::SubtitleFile;
+    }
+    return scopeForRole(styleFileSideBar->currentItem()->data(Qt::UserRole).toInt());
+}
+
+QString ManageSubtitles::currentStyleName() const
+{
+    const QTreeWidgetItem *item = styleList->currentItem();
+    if (item == nullptr) {
+        return QString();
+    }
+    const QVariant data = item->data(0, Qt::UserRole);
+    return data.isValid() ? data.toString() : item->text(0);
+}
+
+QStringList ManageSubtitles::namesForScope(SubtitleStyleScope scope) const
+{
+    QStringList names;
+    switch (scope) {
+    case SubtitleStyleScope::Project:
+        for (const auto &style : m_model->getAllSubtitleStyles(true)) {
+            names.append(style.first);
+        }
+        break;
+    case SubtitleStyleScope::Shared: {
+        const SubtitleStyleLibrary *library = m_model->styleLibrary();
+        if (library) {
+            for (const auto &style : library->sharedStyles()) {
+                names.append(style.first);
+            }
+        }
+        break;
+    }
+    case SubtitleStyleScope::SubtitleFile:
+    default:
+        for (const auto &style : m_model->getAllSubtitleStyles(false)) {
+            names.append(style.first);
+        }
+        break;
+    }
+    return names;
+}
+
+SubtitleStyle ManageSubtitles::styleForScope(const QString &name, SubtitleStyleScope scope) const
+{
+    switch (scope) {
+    case SubtitleStyleScope::Project:
+        if (m_model->getAllSubtitleStyles(true).find(name) != m_model->getAllSubtitleStyles(true).end()) {
+            return m_model->getSubtitleStyle(name, true);
+        }
+        break;
+    case SubtitleStyleScope::Shared: {
+        const SubtitleStyleLibrary *library = m_model->styleLibrary();
+        if (library && library->hasStyle(name)) {
+            return library->style(name);
+        }
+        break;
+    }
+    case SubtitleStyleScope::SubtitleFile:
+    default:
+        if (m_model->getAllSubtitleStyles(false).find(name) != m_model->getAllSubtitleStyles(false).end()) {
+            return m_model->getSubtitleStyle(name, false);
+        }
+        break;
+    }
+    return SubtitleStyle();
+}
+
+void ManageSubtitles::applyStyle(const QString &name, const SubtitleStyle &style, SubtitleStyleScope scope)
+{
+    switch (scope) {
+    case SubtitleStyleScope::Project:
+        m_model->setSubtitleStyle(name, style, true);
+        break;
+    case SubtitleStyleScope::Shared: {
+        SubtitleStyleLibrary *library = m_model->styleLibrary();
+        if (library) {
+            QString error;
+            if (!library->saveStyle(name, style, &error)) {
+                KMessageBox::error(this, error);
+            }
+        }
+        break;
+    }
+    case SubtitleStyleScope::SubtitleFile:
+    default:
+        m_model->setSubtitleStyle(name, style, false);
+        break;
+    }
+}
+
+bool ManageSubtitles::deleteStyleInScope(const QString &name, SubtitleStyleScope scope, bool confirm)
+{
+    if (scope == SubtitleStyleScope::SubtitleFile && name == QLatin1String("Default")) {
+        if (confirm) {
+            KMessageBox::error(this, i18n("Cannot delete default style."));
+        }
+        return false;
+    }
+    if (confirm) {
+        QString message;
+        if (scope == SubtitleStyleScope::SubtitleFile) {
+            message =
+                i18n("This will delete the style <b>%1</b> and all its properties.\nSubtitles using this style will be reset to style <b>Default</b>.", name);
+        } else {
+            message = i18n("This will delete the style <b>%1</b> and all its properties.", name);
+        }
+        if (KMessageBox::warningContinueCancel(this, message) != KMessageBox::Continue) {
+            return false;
+        }
+    }
+    switch (scope) {
+    case SubtitleStyleScope::Project:
+        m_model->deleteSubtitleStyle(name, true);
+        break;
+    case SubtitleStyleScope::Shared: {
+        SubtitleStyleLibrary *library = m_model->styleLibrary();
+        if (!library) {
+            return false;
+        }
+        if (library->isBuiltinStyle(name)) {
+            if (confirm) {
+                KMessageBox::error(this, i18n("Built-in styles cannot be deleted."));
+            }
+            return false;
+        }
+        QString error;
+        if (!library->deleteStyle(name, &error)) {
+            if (confirm) {
+                KMessageBox::error(this, error);
+            }
+            return false;
+        }
+        break;
+    }
+    case SubtitleStyleScope::SubtitleFile:
+    default:
+        m_model->deleteSubtitleStyle(name, false);
+        break;
+    }
+    return true;
+}
+
+void ManageSubtitles::updateStyleButtons()
+{
+    const SubtitleStyleScope scope = currentStyleScope();
+    QTreeWidgetItem *current = styleList->currentItem();
+    const bool hasCurrent = current != nullptr;
+    bool canEdit = hasCurrent;
+    bool canDelete = hasCurrent;
+    bool canDuplicate = hasCurrent;
+    if (hasCurrent) {
+        const QString name = currentStyleName();
+        if (scope == SubtitleStyleScope::SubtitleFile && name == QLatin1String("Default")) {
+            // The default style can be edited but not deleted
+            canDelete = false;
+        }
+        if (scope == SubtitleStyleScope::Shared) {
+            const SubtitleStyleLibrary *library = m_model->styleLibrary();
+            if (library && library->isBuiltinStyle(name)) {
+                // Built-in styles are read-only
+                canEdit = false;
+                canDelete = false;
+            }
+        }
+    }
+    buttonEditStyle->setEnabled(canEdit);
+    buttonDeleteStyle->setEnabled(canDelete);
+    buttonDuplicateStyle->setEnabled(canDuplicate);
+}
+
+void ManageSubtitles::selectSideBarScope(int role)
+{
+    for (int i = 0; i < styleFileSideBar->count(); ++i) {
+        if (styleFileSideBar->item(i)->data(Qt::UserRole).toInt() == role) {
+            styleFileSideBar->setCurrentRow(i);
+            return;
+        }
+    }
+}
+
+void ManageSubtitles::selectStyleByName(const QString &name)
+{
+    for (int i = 0; i < styleList->topLevelItemCount(); ++i) {
+        QTreeWidgetItem *item = styleList->topLevelItem(i);
+        const QVariant data = item->data(0, Qt::UserRole);
+        if ((data.isValid() ? data.toString() : item->text(0)) == name) {
+            styleList->setCurrentItem(item);
+            return;
+        }
+    }
+}
+
+void ManageSubtitles::copyStyleToScope(SubtitleStyleScope scope)
+{
+    const QString sourceName = currentStyleName();
+    if (sourceName.isEmpty()) {
+        return;
+    }
+    const SubtitleStyleScope source = currentStyleScope();
+    const SubtitleStyle style = styleForScope(sourceName, source);
+    const QString newName = uniqueStyleName(sourceName, namesForScope(scope));
+    applyStyle(newName, style, scope);
+    if (scope == SubtitleStyleScope::Project) {
+        selectSideBarScope(-1);
+    } else if (scope == SubtitleStyleScope::Shared) {
+        selectSideBarScope(-2);
+    }
+    parseStyleList(scope);
+    selectStyleByName(newName);
+}
+
+void ManageSubtitles::showStyleMenu(const QPoint &pos)
+{
+    QTreeWidgetItem *item = styleList->itemAt(pos);
+    if (item) {
+        styleList->setCurrentItem(item);
+    }
+    const SubtitleStyleScope scope = currentStyleScope();
+    const bool hasStyle = styleList->currentItem() != nullptr;
+
+    QMenu menu(this);
+    QAction *copyToProject = nullptr;
+    QAction *copyToShared = nullptr;
+    if (hasStyle) {
+        if (scope != SubtitleStyleScope::Project) {
+            copyToProject = menu.addAction(i18n("Copy to Project Styles"));
+        }
+        if (scope != SubtitleStyleScope::Shared) {
+            copyToShared = menu.addAction(i18n("Copy to Shared Styles"));
+        }
+        menu.addSeparator();
+    }
+    QAction *importAction = menu.addAction(QIcon::fromTheme(QStringLiteral("document-import")), i18n("Import Style Set..."));
+    QAction *exportAction = menu.addAction(QIcon::fromTheme(QStringLiteral("document-export")), i18n("Export Style Set..."));
+    exportAction->setEnabled(styleList->topLevelItemCount() > 0);
+    if (m_downloadStyleAction) {
+        menu.addSeparator();
+        menu.addAction(m_downloadStyleAction);
+    }
+
+    QAction *chosen = menu.exec(styleList->viewport()->mapToGlobal(pos));
+    if (chosen == nullptr) {
+        return;
+    }
+    if (chosen == copyToProject) {
+        copyStyleToScope(SubtitleStyleScope::Project);
+    } else if (chosen == copyToShared) {
+        copyStyleToScope(SubtitleStyleScope::Shared);
+    } else if (chosen == importAction) {
+        importStyleSet();
+    } else if (chosen == exportAction) {
+        exportStyleSet();
+    }
+}
+
+void ManageSubtitles::importStyleSet()
+{
+    const QString path = QFileDialog::getOpenFileName(this, i18n("Import Style Set"), QDir::homePath(), i18n("Subtitle Style Set (*.ass)"));
+    if (path.isEmpty()) {
+        return;
+    }
+    SubtitleStyleLibrary *library = m_model->styleLibrary();
+    if (!library) {
+        return;
+    }
+    QString error;
+    if (!library->importSet(path, &error)) {
+        KMessageBox::error(this, error);
+        return;
+    }
+    selectSideBarScope(-2);
+    parseStyleList(SubtitleStyleScope::Shared);
+}
+
+void ManageSubtitles::exportStyleSet()
+{
+    SubtitleStyleLibrary *library = m_model->styleLibrary();
+    if (!library) {
+        return;
+    }
+    const SubtitleStyleScope scope = currentStyleScope();
+    const QString path = QFileDialog::getSaveFileName(this, i18n("Export Style Set"), QDir::homePath() + QStringLiteral("/subtitle-styles.ass"),
+                                                      i18n("Subtitle Style Set (*.ass)"));
+    if (path.isEmpty()) {
+        return;
+    }
+    QString error;
+    bool exported = false;
+    if (scope == SubtitleStyleScope::Shared) {
+        const QString setName = library->styleSetFor(currentStyleName());
+        if (!setName.isEmpty()) {
+            exported = library->exportSet(setName, path, &error);
+        }
+    }
+    if (!exported) {
+        std::map<QString, SubtitleStyle> styles;
+        for (const QString &name : namesForScope(scope)) {
+            styles[name] = styleForScope(name, scope);
+        }
+        exported = library->exportStyles(path, styles, &error);
+    }
+    if (!exported) {
+        KMessageBox::error(this, error);
     }
 }

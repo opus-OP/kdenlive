@@ -15,6 +15,7 @@ set(kdenlive_SRCS
   bin/model/markerlistmodel.cpp
   bin/model/markersortmodel.cpp
   bin/model/subtitlemodel.cpp
+  bin/model/subtitlestylelibrary.cpp
   bin/projectclip.cpp
   bin/projectfolder.cpp
   bin/projectitemmodel.cpp

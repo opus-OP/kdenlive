@@ -237,7 +237,8 @@ SubtitleEdit::SubtitleEdit(QWidget *parent)
     connect(buttonEditStyle, &QToolButton::clicked, this, [this]() {
         bool ok;
         QString styleName = m_model->getStyleName(m_activeSub);
-        SubtitleStyle style = SubtitleStyleEdit::getStyle(this, m_model->getSubtitleStyle(styleName), styleName, m_model, false, &ok);
+        SubtitleStyle style =
+            SubtitleStyleEdit::getStyle(this, m_model->resolveSubtitleStyle(styleName), styleName, m_model, SubtitleStyleScope::SubtitleFile, &ok);
         if (ok) {
             m_model->setSubtitleStyle(styleName, style);
             if (m_model->getStyleName(m_activeSub) != styleName) {
@@ -609,9 +610,9 @@ void SubtitleEdit::setActiveSubtitle(int id)
         tc_duration->setEnabled(true);
         QString styleName = m_model->getStyleName(id);
         comboStyle->clear();
-        for (auto &style : m_model->getAllSubtitleStyles()) {
-            comboStyle->addItem(style.first);
-            if (style.first == styleName) {
+        for (const QString &availableStyle : m_model->availableSubtitleStyleNames()) {
+            comboStyle->addItem(availableStyle);
+            if (availableStyle == styleName) {
                 comboStyle->setCurrentIndex(comboStyle->count() - 1);
             }
         }
@@ -977,7 +978,7 @@ void SubtitleEdit::slotToggleBold()
             }
         }
         // check the style
-        if (m_model->getSubtitleStyle(m_model->getStyleName(m_activeSub)).bold()) {
+        if (m_model->resolveSubtitleStyle(m_model->getStyleName(m_activeSub)).bold()) {
             return true;
         } else {
             return false;
@@ -1099,7 +1100,7 @@ void SubtitleEdit::slotToggleItalic()
             }
         }
         // check the style
-        if (m_model->getSubtitleStyle(m_model->getStyleName(m_activeSub)).italic()) {
+        if (m_model->resolveSubtitleStyle(m_model->getStyleName(m_activeSub)).italic()) {
             return true;
         } else {
             return false;
@@ -1219,7 +1220,7 @@ void SubtitleEdit::slotToggleUnderline()
             }
         }
         // check the style
-        if (m_model->getSubtitleStyle(m_model->getStyleName(m_activeSub)).underline()) {
+        if (m_model->resolveSubtitleStyle(m_model->getStyleName(m_activeSub)).underline()) {
             return true;
         } else {
             return false;
@@ -1338,7 +1339,7 @@ void SubtitleEdit::slotToggleStrikeOut()
             }
         }
         // check the style
-        if (m_model->getSubtitleStyle(m_model->getStyleName(m_activeSub)).strikeOut()) {
+        if (m_model->resolveSubtitleStyle(m_model->getStyleName(m_activeSub)).strikeOut()) {
             return true;
         } else {
             return false;
@@ -1559,9 +1560,7 @@ void SubtitleEdit::slotResetStyle()
 {
     QStringList styles;
     styles.append(i18n("None"));
-    for (auto &style : m_model->getAllSubtitleStyles()) {
-        styles.append(style.first);
-    }
+    styles.append(m_model->availableSubtitleStyleNames());
     QMenu *menu = new QMenu(this);
     for (const QString &style : styles) {
         menu->addAction(style);

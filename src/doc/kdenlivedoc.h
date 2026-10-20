@@ -253,6 +253,11 @@ public:
      *  If final is true, this will be the project filename with ".srt" appended. Otherwise a file in /tmp
      *  If restoreFromBackup is true, we will look for the previous session's work files */
     const QString subTitlePath(const QUuid &uuid, int ix, bool final, bool restoreFromBackup = false);
+    /** @brief Returns the path of the throwaway render file for a subtitle.
+     *  Unlike @ref subTitlePath it always lives in the temp directory and is regenerated on every save.
+     *  It holds the injected animation tags and the styles resolved through the cascade, and is the
+     *  file the subtitles filter reads. */
+    const QString subTitleRenderPath(const QUuid &uuid, int ix);
     /** @brief Returns the list of all used subtitles paths. */
     QStringList getAllSubtitlesPath(bool final);
     /** @brief Creates a new project. */

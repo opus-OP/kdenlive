@@ -1089,7 +1089,10 @@ void KdenliveDoc::updateWorkFilesBeforeSave(const QString &newUrl, bool onRender
                 }
                 QFileInfo info(finalName);
                 QString subPath = info.dir().absoluteFilePath(QStringLiteral("%1.ass").arg(info.fileName()));
-                j.value()->getSubtitleModel()->copySubtitle(subPath, i.key().first, checkOverwrite, true);
+                // When packaging the assets of a render job the copied file must keep the injected
+                // animation tags and resolved styles (the render file); a normal project save copies
+                // the plain editing file so that the persisted sidecar stays clean.
+                j.value()->getSubtitleModel()->copySubtitle(subPath, i.key().first, checkOverwrite, true, onRender);
             }
         }
     }
@@ -2757,6 +2760,21 @@ const QString KdenliveDoc::subTitlePath(const QUuid &uuid, int ix, bool final, b
     }
 }
 
+const QString KdenliveDoc::subTitleRenderPath(const QUuid &uuid, int ix)
+{
+    // The render file is never persisted and always lives in the temp directory; it is overwritten on
+    // every save. It is derived like subTitlePath so that it is unique per document and per sequence.
+    QString documentId = QDir::cleanPath(m_documentProperties.value(QStringLiteral("documentid")));
+    QString path = documentId;
+    if (uuid != m_uuid) {
+        path.append(uuid.toString());
+    }
+    if (ix > 0) {
+        path.append(QStringLiteral("-%1").arg(ix));
+    }
+    return QDir::temp().absoluteFilePath(QStringLiteral("%1-%2-render.ass").arg(path, pCore->sessionId));
+}
+
 void KdenliveDoc::duplicateSequenceProperty(const QUuid &destUuid, const QUuid &srcUuid, const QString &subsData)
 {
     QJsonArray list;
@@ -2851,7 +2869,14 @@ std::map<QString, SubtitleStyle> KdenliveDoc::globalSubtitleStyles(const QUuid &
         }
         QString styleString = entryObj[QLatin1String("style")].toString();
         const QString styleName = styleString.section(":", 1).trimmed().split(",").at(0);
-        const SubtitleStyle style(styleString);
+        SubtitleStyle style(styleString);
+        // Older projects have no "animation" field: such styles keep the disabled (None) animation
+        if (entryObj.contains(QLatin1String("animation"))) {
+            style.setAnimation(SubtitleAnimation::fromString(entryObj[QLatin1String("animation")].toString()));
+        }
+        if (entryObj.contains(QLatin1String("animationOut"))) {
+            style.setAnimationOut(SubtitleAnimation::fromString(entryObj[QLatin1String("animationOut")].toString()));
+        }
         results[styleName] = style;
     }
     return results;

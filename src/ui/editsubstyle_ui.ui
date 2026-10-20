@@ -297,18 +297,247 @@ SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
      </property>
     </widget>
    </item>
-   <item row="11" column="2">
-    <spacer name="verticalSpacer">
-     <property name="orientation">
-      <enum>Qt::Orientation::Vertical</enum>
+   <item row="11" column="0" colspan="6">
+    <widget class="QGroupBox" name="groupBoxAnimation">
+     <property name="title">
+      <string>Animation</string>
      </property>
-     <property name="sizeHint" stdset="0">
-      <size>
-       <width>20</width>
-       <height>40</height>
-      </size>
-     </property>
-    </spacer>
+     <layout class="QVBoxLayout" name="animationLayout">
+      <item>
+       <widget class="QTabWidget" name="tabWidgetAnimation">
+        <property name="currentIndex">
+         <number>0</number>
+        </property>
+        <widget class="QWidget" name="tabAnimationIn">
+         <attribute name="title">
+          <string>Appearance</string>
+         </attribute>
+         <layout class="QGridLayout" name="animationInGridLayout">
+          <item row="0" column="0">
+           <widget class="QLabel" name="labelAnimationPreset">
+            <property name="text">
+             <string>Preset</string>
+            </property>
+            <property name="alignment">
+             <set>Qt::AlignmentFlag::AlignRight|Qt::AlignmentFlag::AlignTrailing|Qt::AlignmentFlag::AlignVCenter</set>
+            </property>
+           </widget>
+          </item>
+          <item row="0" column="1">
+           <widget class="QComboBox" name="comboAnimationPreset"/>
+          </item>
+          <item row="1" column="0">
+           <widget class="QLabel" name="labelAnimationDelay">
+            <property name="text">
+             <string>Delay</string>
+            </property>
+            <property name="alignment">
+             <set>Qt::AlignmentFlag::AlignRight|Qt::AlignmentFlag::AlignTrailing|Qt::AlignmentFlag::AlignVCenter</set>
+            </property>
+           </widget>
+          </item>
+          <item row="1" column="1">
+           <widget class="QSpinBox" name="spinAnimationDelay">
+            <property name="suffix">
+             <string> ms</string>
+            </property>
+            <property name="maximum">
+             <number>60000</number>
+            </property>
+           </widget>
+          </item>
+          <item row="2" column="0">
+           <widget class="QLabel" name="labelAnimationDuration">
+            <property name="text">
+             <string>Duration</string>
+            </property>
+            <property name="alignment">
+             <set>Qt::AlignmentFlag::AlignRight|Qt::AlignmentFlag::AlignTrailing|Qt::AlignmentFlag::AlignVCenter</set>
+            </property>
+           </widget>
+          </item>
+          <item row="2" column="1">
+           <widget class="QSpinBox" name="spinAnimationDuration">
+            <property name="suffix">
+             <string> ms</string>
+            </property>
+            <property name="maximum">
+             <number>60000</number>
+            </property>
+            <property name="value">
+             <number>500</number>
+            </property>
+           </widget>
+          </item>
+          <item row="3" column="0">
+           <widget class="QLabel" name="labelAnimationIntensity">
+            <property name="text">
+             <string>Intensity / scale</string>
+            </property>
+            <property name="alignment">
+             <set>Qt::AlignmentFlag::AlignRight|Qt::AlignmentFlag::AlignTrailing|Qt::AlignmentFlag::AlignVCenter</set>
+            </property>
+           </widget>
+          </item>
+          <item row="3" column="1">
+           <widget class="QDoubleSpinBox" name="spinAnimationIntensity">
+            <property name="minimum">
+             <double>0.100000000000000</double>
+            </property>
+            <property name="maximum">
+             <double>10.000000000000000</double>
+            </property>
+            <property name="singleStep">
+             <double>0.100000000000000</double>
+            </property>
+            <property name="value">
+             <double>1.000000000000000</double>
+            </property>
+           </widget>
+          </item>
+          <item row="4" column="0">
+           <widget class="QLabel" name="labelAnimationDirection">
+            <property name="text">
+             <string>Direction</string>
+            </property>
+            <property name="alignment">
+             <set>Qt::AlignmentFlag::AlignRight|Qt::AlignmentFlag::AlignTrailing|Qt::AlignmentFlag::AlignVCenter</set>
+            </property>
+           </widget>
+          </item>
+          <item row="4" column="1">
+           <widget class="QSpinBox" name="spinAnimationDirection">
+            <property name="maximum">
+             <number>3</number>
+            </property>
+           </widget>
+          </item>
+          <item row="5" column="0" colspan="2">
+           <widget class="QCheckBox" name="checkAnimationEase">
+            <property name="text">
+             <string>Decelerate</string>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+        <widget class="QWidget" name="tabAnimationOut">
+         <attribute name="title">
+          <string>Disappearance</string>
+         </attribute>
+         <layout class="QGridLayout" name="animationOutGridLayout">
+          <item row="0" column="0">
+           <widget class="QLabel" name="labelAnimationOutPreset">
+            <property name="text">
+             <string>Preset</string>
+            </property>
+            <property name="alignment">
+             <set>Qt::AlignmentFlag::AlignRight|Qt::AlignmentFlag::AlignTrailing|Qt::AlignmentFlag::AlignVCenter</set>
+            </property>
+           </widget>
+          </item>
+          <item row="0" column="1">
+           <widget class="QComboBox" name="comboAnimationOutPreset"/>
+          </item>
+          <item row="1" column="0">
+           <widget class="QLabel" name="labelAnimationOutDelay">
+            <property name="text">
+             <string>Delay</string>
+            </property>
+            <property name="alignment">
+             <set>Qt::AlignmentFlag::AlignRight|Qt::AlignmentFlag::AlignTrailing|Qt::AlignmentFlag::AlignVCenter</set>
+            </property>
+           </widget>
+          </item>
+          <item row="1" column="1">
+           <widget class="QSpinBox" name="spinAnimationOutDelay">
+            <property name="suffix">
+             <string> ms</string>
+            </property>
+            <property name="maximum">
+             <number>60000</number>
+            </property>
+           </widget>
+          </item>
+          <item row="2" column="0">
+           <widget class="QLabel" name="labelAnimationOutDuration">
+            <property name="text">
+             <string>Duration</string>
+            </property>
+            <property name="alignment">
+             <set>Qt::AlignmentFlag::AlignRight|Qt::AlignmentFlag::AlignTrailing|Qt::AlignmentFlag::AlignVCenter</set>
+            </property>
+           </widget>
+          </item>
+          <item row="2" column="1">
+           <widget class="QSpinBox" name="spinAnimationOutDuration">
+            <property name="suffix">
+             <string> ms</string>
+            </property>
+            <property name="maximum">
+             <number>60000</number>
+            </property>
+            <property name="value">
+             <number>500</number>
+            </property>
+           </widget>
+          </item>
+          <item row="3" column="0">
+           <widget class="QLabel" name="labelAnimationOutIntensity">
+            <property name="text">
+             <string>Intensity / scale</string>
+            </property>
+            <property name="alignment">
+             <set>Qt::AlignmentFlag::AlignRight|Qt::AlignmentFlag::AlignTrailing|Qt::AlignmentFlag::AlignVCenter</set>
+            </property>
+           </widget>
+          </item>
+          <item row="3" column="1">
+           <widget class="QDoubleSpinBox" name="spinAnimationOutIntensity">
+            <property name="minimum">
+             <double>0.100000000000000</double>
+            </property>
+            <property name="maximum">
+             <double>10.000000000000000</double>
+            </property>
+            <property name="singleStep">
+             <double>0.100000000000000</double>
+            </property>
+            <property name="value">
+             <double>1.000000000000000</double>
+            </property>
+           </widget>
+          </item>
+          <item row="4" column="0">
+           <widget class="QLabel" name="labelAnimationOutDirection">
+            <property name="text">
+             <string>Direction</string>
+            </property>
+            <property name="alignment">
+             <set>Qt::AlignmentFlag::AlignRight|Qt::AlignmentFlag::AlignTrailing|Qt::AlignmentFlag::AlignVCenter</set>
+            </property>
+           </widget>
+          </item>
+          <item row="4" column="1">
+           <widget class="QSpinBox" name="spinAnimationOutDirection">
+            <property name="maximum">
+             <number>3</number>
+            </property>
+           </widget>
+          </item>
+          <item row="5" column="0" colspan="2">
+           <widget class="QCheckBox" name="checkAnimationOutEase">
+            <property name="text">
+             <string>Decelerate</string>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+       </widget>
+      </item>
+     </layout>
+    </widget>
    </item>
    <item row="12" column="0" colspan="6">
     <widget class="QPushButton" name="buttonPreview">
@@ -502,6 +731,19 @@ SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
   <tabstop>spinMarginV</tabstop>
   <tabstop>spinScaleX</tabstop>
   <tabstop>spinScaleY</tabstop>
+  <tabstop>comboAnimationPreset</tabstop>
+  <tabstop>spinAnimationDelay</tabstop>
+  <tabstop>spinAnimationDuration</tabstop>
+  <tabstop>spinAnimationIntensity</tabstop>
+  <tabstop>spinAnimationDirection</tabstop>
+  <tabstop>checkAnimationEase</tabstop>
+  <tabstop>tabWidgetAnimation</tabstop>
+  <tabstop>comboAnimationOutPreset</tabstop>
+  <tabstop>spinAnimationOutDelay</tabstop>
+  <tabstop>spinAnimationOutDuration</tabstop>
+  <tabstop>spinAnimationOutIntensity</tabstop>
+  <tabstop>spinAnimationOutDirection</tabstop>
+  <tabstop>checkAnimationOutEase</tabstop>
   <tabstop>buttonPreview</tabstop>
   <tabstop>editPreview</tabstop>
  </tabstops>
